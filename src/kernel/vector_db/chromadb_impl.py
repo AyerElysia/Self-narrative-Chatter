@@ -224,7 +224,7 @@ class ChromaDBImpl(VectorDBBase):
             return {"$and": conditions}
 
         except Exception as e:
-            logger.warning(f"处理where条件失败: {e}, 使用简化条件")
+            logger.warning(f"处理where条件失败: {e}")
             return None
 
     async def get(

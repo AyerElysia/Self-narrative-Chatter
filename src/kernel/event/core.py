@@ -58,24 +58,7 @@ EventHandlerCallable = Callable[
 class _Subscriber:
     handler: EventHandlerCallable
     priority: int
-    order: int
-
-
-def _validate_subscriber(handler: EventHandlerCallable) -> None:
-    """验证订阅者是否可被 (event_name, params) 调用。"""
-
-    try:
-        sig = inspect.signature(handler)
-    except Exception as e:
-        raise ValueError(f"处理器签名不可解析: {e}") from e
-
-    try:
-        sig.bind_partial("__probe__", {})
-    except TypeError as e:
-        raise ValueError(
-            "处理器必须支持 handler(event_name, params) 形式调用"
-        ) from e
-
+    order: int           
 
 class EventBus:
     """事件总线，用于发布/订阅模式。
@@ -128,8 +111,6 @@ class EventBus:
             raise ValueError("事件名称不能为空")
         if not callable(handler):
             raise ValueError("处理器必须是可调用对象")
-
-        _validate_subscriber(handler)
 
         # 如果重复订阅同一个 handler，则更新 priority，保持最初 order 以稳定排序
         existing = self._subscribers[event_name].get(handler)

@@ -6,7 +6,7 @@
 
 import random
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from src.core.components.types import ChatType
 from src.kernel.llm.payload.tooling import LLMUsable

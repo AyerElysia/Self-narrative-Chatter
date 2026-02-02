@@ -5,7 +5,7 @@ Command 组件使用 Trie 树进行命令匹配，支持多级命令和参数解
 管理器维护 Command 组件的全局集合，并提供命令解析和执行接口。
 """
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from src.kernel.logger import get_logger
 

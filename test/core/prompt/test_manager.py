@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from src.core.prompt.manager import PromptManager, get_prompt_manager, reset_prompt_manager
 from src.core.prompt.template import PromptTemplate

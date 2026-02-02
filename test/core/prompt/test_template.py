@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from src.core.prompt.template import PromptTemplate
-from src.core.prompt.policies import optional, trim, min_len, header
+from src.core.prompt.policies import trim, min_len, header
 
 
 class TestPromptTemplate:

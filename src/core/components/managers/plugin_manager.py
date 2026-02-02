@@ -5,7 +5,6 @@
 使用 loader.py 中的依赖解析器进行拓扑排序，确保依赖顺序正确加载。
 """
 
-import asyncio
 import importlib.util
 import json
 import sys
@@ -15,7 +14,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from src.kernel.logger import get_logger
-from src.kernel.concurrency import get_task_manager
 
 from src.core.components.loader import (
     PluginManifest,
@@ -24,7 +22,7 @@ from src.core.components.loader import (
 )
 from src.core.components.registry import get_global_registry
 from src.core.components.state_manager import get_global_state_manager
-from src.core.components.types import ComponentState, build_signature
+from src.core.components.types import ComponentState, ComponentType, build_signature
 
 if TYPE_CHECKING:
     from src.core.components.base.plugin import BasePlugin
@@ -128,7 +126,7 @@ class PluginManager:
         # 1. 解析 manifest.json
         manifest = await self._load_manifest(plugin_path)
         if not manifest:
-            error_msg = f"无法加载 manifest.json"
+            error_msg = "无法加载 manifest.json"
             self._failed_plugins[manifest.name if manifest else plugin_path] = error_msg
             return False
 
@@ -153,14 +151,14 @@ class PluginManager:
             plugin_module = await self._load_from_folder(plugin_path, manifest)
 
         if not plugin_module:
-            error_msg = f"插件模块加载失败"
+            error_msg = "插件模块加载失败"
             self._failed_plugins[manifest.name] = error_msg
             return False
 
         # 5. 查找 @register_plugin 注册的插件类
         plugin_class = get_plugin_class(manifest.name)
         if not plugin_class:
-            error_msg = f"插件类未注册（未使用 @register_plugin 装饰器）"
+            error_msg = "插件类未注册（未使用 @register_plugin 装饰器）"
             self._failed_plugins[manifest.name] = error_msg
             logger.error(f"插件 '{manifest.name}' 加载失败: {error_msg}")
             return False

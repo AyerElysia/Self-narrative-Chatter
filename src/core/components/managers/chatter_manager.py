@@ -5,7 +5,7 @@ Chatter 是 Bot 的智能核心，定义对话逻辑和 LLMUsable 过滤。
 管理器维护 Chatter 组件的全局集合，并提供查询接口。
 """
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from src.kernel.logger import get_logger
 from src.kernel.llm.payload.tooling import LLMUsable

@@ -13,7 +13,6 @@ from src.core.components.utils import parse_function_signature
 
 if TYPE_CHECKING:
     from src.core.components.base.plugin import BasePlugin
-    from src.core.models.message import Message
     from src.kernel.llm.payload.tooling import LLMUsable
 
 

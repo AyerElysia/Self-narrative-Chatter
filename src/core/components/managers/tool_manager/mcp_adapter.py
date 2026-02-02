@@ -5,7 +5,7 @@
 """
 
 import mcp.types
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from src.kernel.logger import get_logger
 
 logger = get_logger("mcp_adapter")

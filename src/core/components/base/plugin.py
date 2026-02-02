@@ -4,7 +4,7 @@
 插件是组件的容器，包含其他各种类型的组件。
 """
 
-from abc import ABC, abstractmethod
+from abc import ABC
 from typing import TYPE_CHECKING, type
 
 if TYPE_CHECKING:

@@ -4,6 +4,7 @@
 支持插件类用于注册自身的 @register_plugin 装饰器。
 """
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -146,11 +147,6 @@ def get_registry_count() -> int:
         >>> 5
     """
     return len(_plugin_registry)
-
-
-# 插件清单的数据类
-from dataclasses import dataclass
-
 
 @dataclass
 class ComponentInclude:

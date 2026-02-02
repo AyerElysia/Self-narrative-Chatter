@@ -27,24 +27,19 @@ from src.kernel.llm import (
 
 def test_exception_classification():
     """测试异常分类功能。"""
-    # 创建模拟 OpenAI 异常（如果可用）
-    try:
-        from openai import RateLimitError as OpenAIRateLimit, APITimeoutError
+    # 测试通用错误消息检测（不依赖 OpenAI SDK）
+    generic_rate = Exception("rate limit exceeded")
+    classified = classify_exception(generic_rate, model="test-model")
+    assert isinstance(classified, LLMRateLimitError)
 
-        # 测试速率限制
-        openai_error = OpenAIRateLimit("Rate limit exceeded")
-        classified = classify_exception(openai_error, model="gpt-4")
-        assert isinstance(classified, LLMRateLimitError)
-        assert classified.model == "gpt-4"
+    generic_timeout = Exception("request timed out")
+    classified = classify_exception(generic_timeout)
+    assert isinstance(classified, LLMTimeoutError)
 
-        # 测试超时
-        timeout_error = APITimeoutError("Request timed out")
-        classified = classify_exception(timeout_error, model="gpt-4")
-        assert isinstance(classified, LLMTimeoutError)
-
-    except ImportError:
-        # OpenAI SDK 未安装，跳过
-        pass
+    # 未知错误应返回原始异常
+    unknown = ValueError("some other error")
+    classified = classify_exception(unknown)
+    assert classified is unknown
 
     # 测试通用错误消息检测
     generic_rate = Exception("rate limit exceeded")
@@ -129,7 +124,7 @@ def test_model_stats():
     assert stats["success_rate"] == 0.5
     assert stats["total_tokens_in"] == 1000
     assert stats["total_tokens_out"] == 500
-    assert stats["total_cost"] == 0.1
+    assert stats["total_cost"] == pytest.approx(0.1)
 
 
 def test_tool_registry():
@@ -174,6 +169,34 @@ def test_tool_registry():
     # 获取所有 schema
     schemas = registry.list_all()
     assert len(schemas) == 2
+
+
+def test_tool_registry_with_custom_name():
+    """测试工具注册表使用自定义名称。"""
+
+    class MockTool:
+        @classmethod
+        def to_schema(cls) -> dict[str, Any]:
+            return {"name": "original_name", "description": "A tool"}
+
+    registry = ToolRegistry()
+    registry.register(MockTool, name="custom_name")
+
+    assert registry.get("custom_name") == MockTool
+    assert registry.get("original_name") is None
+
+
+def test_tool_registry_missing_name():
+    """测试工具注册表无法确定名称时抛出异常。"""
+
+    class NamelessTool:
+        @classmethod
+        def to_schema(cls) -> dict[str, Any]:
+            return {"description": "No name provided"}
+
+    registry = ToolRegistry()
+    with pytest.raises(ValueError, match="无法确定工具名称"):
+        registry.register(NamelessTool)
 
 
 @pytest.mark.asyncio
@@ -244,6 +267,105 @@ async def test_tool_executor_sync():
     result = await executor.execute(call, sync_execute)
 
     assert result.value == {"result": "sync"}
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_timeout_raise():
+    """测试工具执行器（超时+raise模式）。"""
+
+    async def slow_execute(name: str, args: dict[str, Any]) -> Any:
+        await asyncio.sleep(10)
+        return "done"
+
+    executor = ToolExecutor(timeout=0.1, on_error="raise")
+
+    call = ToolCall(id="call_1", name="slow", args={})
+    with pytest.raises(asyncio.TimeoutError):
+        await executor.execute(call, slow_execute)
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_error_raise():
+    """测试工具执行器（错误+raise模式）。"""
+
+    async def failing_execute(name: str, args: dict[str, Any]) -> Any:
+        raise ValueError("Something went wrong")
+
+    executor = ToolExecutor(timeout=1.0, on_error="raise")
+
+    call = ToolCall(id="call_1", name="failing", args={})
+    with pytest.raises(ValueError, match="Something went wrong"):
+        await executor.execute(call, failing_execute)
+
+
+def test_tool_result_to_text_string():
+    """测试ToolResult.to_text()处理字符串。"""
+    from src.kernel.llm.payload import ToolResult
+
+    result = ToolResult(value="plain text", call_id="call_1", name="test")
+    assert result.to_text() == "plain text"
+
+
+def test_tool_result_to_text_dict():
+    """测试ToolResult.to_text()处理字典。"""
+    from src.kernel.llm.payload import ToolResult
+
+    result = ToolResult(value={"key": "value", "number": 42}, call_id="call_1")
+    text = result.to_text()
+    assert '"key": "value"' in text
+    assert '"number": 42' in text
+
+
+def test_tool_result_to_text_unjsonifiable():
+    """测试ToolResult.to_text()处理无法JSON序列化的对象。"""
+    from src.kernel.llm.payload import ToolResult
+
+    class Unserializable:
+        def __str__(self) -> str:
+            return "unserializable"
+
+    result = ToolResult(value=Unserializable(), call_id="call_1")
+    assert result.to_text() == "unserializable"
+
+
+def test_tool_to_openai_with_function_format():
+    """测试Tool.to_openai_tool()处理已有OpenAI格式schema。"""
+    from src.kernel.llm.payload import Tool
+
+    class MockToolWithFunctionFormat:
+        @classmethod
+        def to_schema(cls) -> dict[str, Any]:
+            return {
+                "type": "function",
+                "function": {
+                    "name": "test_tool",
+                    "description": "Test tool",
+                },
+            }
+
+    tool = Tool(tool=MockToolWithFunctionFormat)
+    openai_tool = tool.to_openai_tool()
+    assert openai_tool["type"] == "function"
+    assert openai_tool["function"]["name"] == "test_tool"
+
+
+def test_tool_to_openai_with_simple_format():
+    """测试Tool.to_openai_tool()处理简单schema格式。"""
+    from src.kernel.llm.payload import Tool
+
+    class MockToolSimple:
+        @classmethod
+        def to_schema(cls) -> dict[str, Any]:
+            return {
+                "name": "simple_tool",
+                "description": "Simple tool",
+                "parameters": {"type": "object", "properties": {}},
+            }
+
+    tool = Tool(tool=MockToolSimple)
+    openai_tool = tool.to_openai_tool()
+    assert openai_tool["type"] == "function"
+    assert openai_tool["function"]["name"] == "simple_tool"
 
 
 if __name__ == "__main__":

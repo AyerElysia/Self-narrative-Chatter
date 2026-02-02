@@ -138,7 +138,7 @@ class TestEventBusPublish:
             params["v"] += 1
             return (EventDecision.SUCCESS, params)
 
-        bus.subscribe("e", mutating_but_invalid, priority=20)
+        bus.subscribe("e", mutating_but_invalid, priority=20)   # type: ignore[misc]
         bus.subscribe("e", next_handler, priority=10)
 
         decision, out = await bus.publish("e", {"v": 0})

@@ -8,7 +8,6 @@
 - 缓存管理
 """
 
-import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -447,7 +446,6 @@ class TestQueryAndUtilities:
         with patch(
             "src.core.managers.stream_manager.QueryBuilder"
         ) as mock_qb:
-            from src.core.models.message import Message, MessageType
 
             mock_msg = MagicMock()
             mock_msg.message_id = "msg1"

@@ -5,7 +5,6 @@ Action 是"主动的响应"，通过 LLM Tool Calling 调用。
 管理器维护 Action 组件的全局集合，并根据聊天上下文过滤可用的 Action。
 """
 
-import asyncio
 from typing import TYPE_CHECKING, Any
 
 from src.kernel.logger import get_logger

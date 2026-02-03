@@ -8,14 +8,12 @@ Chatter 是 Bot 的智能核心，定义对话逻辑和 LLMUsable 过滤。
 from typing import TYPE_CHECKING
 
 from src.kernel.logger import get_logger
-from src.kernel.llm.payload.tooling import LLMUsable
 
 from src.core.components.registry import get_global_registry
 from src.core.components.types import ComponentType
 
 if TYPE_CHECKING:
     from src.core.components.base.chatter import BaseChatter
-    from src.core.models.message import Message
 
 
 logger = get_logger("chatter_manager")

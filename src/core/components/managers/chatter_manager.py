@@ -110,9 +110,35 @@ class ChatterManager:
             logger.warning(f"Chatter 类未找到: {signature}")
             return []
 
-        # TODO: 实现 LLMUsable 过滤逻辑
-        # 需要获取全局的 LLMUsable 集合，然后调用 Chatter 的过滤方法
-        return []
+        # 解析签名获取 plugin_name
+        from src.core.components.types import parse_signature
+        from src.core.components.managers.plugin_manager import get_plugin_manager
+
+        sig_info = parse_signature(signature)
+        plugin_manager = get_plugin_manager()
+        plugin = plugin_manager.get_plugin(sig_info["plugin_name"])
+
+        if not plugin:
+            logger.warning(f"Plugin 未找到: {sig_info['plugin_name']}")
+            return []
+
+        # 创建临时 Chatter 实例
+        # 使用第一条消息的 stream_id（或默认值）
+        stream_id = unreads[0].stream_id if unreads else "default"
+        chatter_instance = chatter_cls(stream_id=stream_id, plugin=plugin)
+
+        # 获取所有 LLMUsable
+        all_usables = await chatter_instance.get_llm_usables()
+
+        # 调用 Chatter 的过滤方法（只传递 llm_usables 参数）
+        filtered_usables = await chatter_instance.modify_llm_usables(all_usables)
+
+        logger.debug(
+            f"Chatter '{signature}' 过滤 LLMUsable: "
+            f"{len(all_usables)} -> {len(filtered_usables)}"
+        )
+
+        return filtered_usables
 
     def get_active_chatters(self) -> dict[str, "BaseChatter"]:
         """获取当前活跃的 Chatter 实例。

@@ -8,6 +8,7 @@ from src.core.components.managers.plugin_manager import get_plugin_manager, Plug
 from src.core.components.managers.action_manager import get_action_manager, ActionManager
 from src.core.components.managers.chatter_manager import get_chatter_manager, ChatterManager
 from src.core.components.managers.command_manager import get_command_manager, CommandManager
+from src.core.components.managers.service_manager import get_service_manager, ServiceManager
 
 __all__ = [
     # 主要管理器
@@ -19,4 +20,6 @@ __all__ = [
     "ChatterManager",
     "get_command_manager",
     "CommandManager",
+    "get_service_manager",
+    "ServiceManager",
 ]

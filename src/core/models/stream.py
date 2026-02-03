@@ -1,4 +1,219 @@
-"""Chat/stream related models."""
+"""Chat/stream related models.
 
-class Stream:
-    pass
+本模块提供聊天流相关的数据模型，包括 StreamContext 和 ChatStream 类。
+参考 old/common/data_models/message_manager_data_model.py 和 old/chat/message_receive/chat_stream.py 实现。
+简化版，移除数据库相关功能，保留核心上下文管理。
+"""
+
+import hashlib
+import time
+from collections import deque
+from dataclasses import dataclass, field
+from functools import lru_cache
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.core.models.message import Message
+
+
+@dataclass
+class StreamContext:
+    """聊天流上下文信息。
+
+    参考 old/common/data_models/message_manager_data_model.py 中的 StreamContext 实现。
+    简化版，移除数据库相关功能，保留核心上下文管理。
+
+    Attributes:
+        stream_id: 聊天流唯一标识符
+        chat_type: 聊天类型（private/group/discuss）
+        chat_mode: 聊天模式（focus/normal/proactive/priority）
+        max_context_size: 最大上下文大小
+        unread_messages: 未读消息列表
+        history_messages: 历史消息列表
+        is_active: 是否活跃
+        is_chatter_processing: Chatter 是否正在处理
+        message_cache: 消息缓存队列
+        is_cache_enabled: 是否启用消息缓存
+    """
+
+    stream_id: str
+    chat_type: str = "private"  # private/group/discuss
+    chat_mode: str = "focus"  # focus/normal/proactive/priority
+    max_context_size: int = 100
+    unread_messages: list["Message"] = field(default_factory=list)
+    history_messages: list["Message"] = field(default_factory=list)
+    is_active: bool = True
+    is_chatter_processing: bool = False
+    interruption_count: int = 0
+    last_interruption_time: float = 0.0
+
+    # 当前消息
+    current_message: "Message | None" = None
+    triggering_user_id: str | None = None
+    is_replying: bool = False
+    processing_message_id: str | None = None
+
+    # 消息缓存系统
+    message_cache: deque["Message"] = field(default_factory=deque)
+    is_cache_enabled: bool = False
+
+    # 统计信息
+    created_time: float = field(default_factory=time.time)
+    last_access_time: float = field(default_factory=time.time)
+    access_count: int = 0
+    total_messages: int = 0
+
+    def set_current_message(self, message: "Message") -> None:
+        """设置当前消息。
+
+        Args:
+            message: 消息对象
+        """
+        self.current_message = message
+        self._update_access_stats()
+
+    def _update_access_stats(self) -> None:
+        """更新访问统计信息。"""
+        self.last_access_time = time.time()
+        self.access_count += 1
+
+    def add_unread_message(self, message: "Message") -> None:
+        """添加未读消息。
+
+        Args:
+            message: 消息对象
+        """
+        self.unread_messages.append(message)
+        self.total_messages += 1
+        self._update_access_stats()
+
+    def add_history_message(self, message: "Message") -> None:
+        """添加历史消息。
+
+        Args:
+            message: 消息对象
+        """
+        self.history_messages.append(message)
+        # 限制历史消息大小
+        if len(self.history_messages) > self.max_context_size:
+            self.history_messages = self.history_messages[-self.max_context_size :]
+        self._update_access_stats()
+
+
+class ChatStream:
+    """聊天流对象，存储一个完整的聊天上下文。
+
+    参考 old/chat/message_receive/chat_stream.py 中的 ChatStream 实现。
+    简化版，移除数据库相关功能。
+
+    Attributes:
+        stream_id: 聊天流唯一标识符（SHA-256 哈希）
+        platform: 平台标识
+        message: 初始消息
+        context: 聊天流上下文
+        create_time: 创建时间
+        last_active_time: 最后活跃时间
+
+    Examples:
+        >>> stream = ChatStream(
+        ...     stream_id="abc123",
+        ...     platform="qq",
+        ...     message=message
+        ... )
+    """
+
+    def __init__(
+        self,
+        stream_id: str,
+        platform: str = "",
+        message: "Message | None" = None,
+    ) -> None:
+        """初始化聊天流。
+
+        Args:
+            stream_id: 聊天流唯一标识符
+            platform: 平台标识
+            message: 初始消息
+        """
+        self.stream_id = stream_id
+        self.platform = platform
+        self.message = message
+        self.create_time = time.time()
+        self.last_active_time = time.time()
+
+        # 初始化 StreamContext
+        self.context: StreamContext = StreamContext(
+            stream_id=stream_id,
+            chat_type="group" if message and message.chat_type == "group" else "private",
+        )
+
+    def update_active_time(self) -> None:
+        """更新最后活跃时间。"""
+        self.last_active_time = time.time()
+
+    def get_raw_id(self) -> str:
+        """获取原始的、未哈希的聊天流ID字符串。
+
+        Returns:
+            str: 原始 ID 字符串，格式为 "platform:id:type"
+        """
+        # 从 stream_id 反向推导不太可能，返回哈希值
+        # 实际使用时应该在外部保存原始 ID
+        return f"{self.platform}:{self.stream_id}"
+
+    async def set_context(self, message: "Message") -> None:
+        """设置聊天消息上下文。
+
+        Args:
+            message: 消息对象
+        """
+        self.message = message
+        self.context.set_current_message(message)
+        self.update_active_time()
+
+    @staticmethod
+    @lru_cache(maxsize=10000)
+    def _generate_stream_id_cached(key: str) -> str:
+        """缓存的 stream_id 生成（内部使用）。
+
+        Args:
+            key: 原始键
+
+        Returns:
+            str: SHA-256 哈希值
+        """
+        return hashlib.sha256(key.encode()).hexdigest()
+
+    @staticmethod
+    def generate_stream_id(platform: str, user_id: str = "", group_id: str = "") -> str:
+        """生成聊天流唯一 ID。
+
+        使用 SHA-256 哈希生成唯一标识符。
+
+        Args:
+            platform: 平台标识
+            user_id: 用户 ID（私聊时使用）
+            group_id: 群组 ID（群聊时使用）
+
+        Returns:
+            str: SHA-256 哈希的 stream_id
+
+        Raises:
+            ValueError: 如果既没有 user_id 也没有 group_id
+
+        Examples:
+            >>> ChatStream.generate_stream_id("qq", user_id="123")
+            "abc123..."
+            >>> ChatStream.generate_stream_id("qq", group_id="456")
+            "def456..."
+        """
+        if not user_id and not group_id:
+            raise ValueError("user_id 或 group_id 必须提供至少一个")
+
+        if group_id:
+            key = f"{platform}_{group_id}"
+        else:
+            key = f"{platform}_{user_id}_private"
+
+        return ChatStream._generate_stream_id_cached(key)
+

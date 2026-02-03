@@ -439,6 +439,10 @@ class PluginManager:
                 registry.register(component_cls, signature, dependencies)
                 logger.debug(f"注册组件: {signature}")
 
+                # 设置组件元数据属性，供其他管理器反向查找
+                component_cls.__signature__ = signature
+                component_cls.__plugin__ = plugin_name
+
                 # 设置组件状态
                 await state_manager.set_state_async(signature, ComponentState.ACTIVE)
 

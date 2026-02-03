@@ -242,17 +242,22 @@ class ActionManager:
         if not action_cls:
             raise ValueError(f"Action 类未找到: {signature}")
 
-        # 获取 chat_stream
-        # TODO: 从 message 或 context 获取 chat_stream
+        # 创建 ChatStream 实例
+        from src.core.models.stream import ChatStream
+
+        chat_stream = ChatStream(
+            stream_id=message.stream_id,
+            platform=message.platform,
+            message=message,
+        )
 
         # 创建 Action 实例
-        # action_instance = action_cls(chat_stream=chat_stream, plugin=plugin)
+        action_instance = action_cls(chat_stream=chat_stream, plugin=plugin)
 
         # 执行 Action
         try:
-            # result = await action_instance.execute(**kwargs)
-            # return result
-            pass  # TODO: 实现
+            result = await action_instance.execute(**kwargs)
+            return result
         except Exception as e:
             logger.error(f"执行 Action 失败 ({signature}): {e}")
             raise RuntimeError(f"Action 执行失败: {e}") from e
@@ -277,14 +282,29 @@ class ActionManager:
     def _build_signature(self, action_cls: type["BaseAction"]) -> str:
         """构建 Action 组件签名。
 
+        从 Action 类的 __signature__ 属性获取签名，该属性在组件注册时设置。
+        如果属性不存在，则从注册表反向查找。
+
         Args:
             action_cls: Action 类
 
         Returns:
             str: 组件签名
         """
-        # TODO: 从 action_cls 获取 plugin_name 和 component_name
-        # 目前需要从注册表或其他方式获取
+        # 优先使用 __signature__ 属性（在 plugin_manager 注册时设置）
+        if hasattr(action_cls, "__signature__"):
+            return getattr(action_cls, "__signature__")  # type: ignore[attr-defined]
+
+        # 如果属性不存在，从注册表反向查找
+        registry = get_global_registry()
+        all_actions = registry.get_by_type(ComponentType.ACTION)
+
+        for signature, cls in all_actions.items():
+            if cls is action_cls:
+                return signature
+
+        # 找不到签名，返回空字符串
+        logger.warning(f"无法找到 Action 类的签名: {action_cls.__name__}")
         return ""
 
 

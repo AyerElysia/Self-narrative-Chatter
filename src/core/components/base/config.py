@@ -7,7 +7,7 @@
 
 from abc import ABC
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from src.kernel.config import ConfigBase
 
@@ -42,7 +42,7 @@ class BaseConfig(ABC, ConfigBase):
     """
 
     # 所属插件名称（如被注入，可用于默认路径等场景）
-    plugin_name: str = "unknown_plugin"
+    plugin_name: ClassVar[str] = "unknown_plugin"
 
     # 这些属性应由子类覆盖
     config_name: str = "config"

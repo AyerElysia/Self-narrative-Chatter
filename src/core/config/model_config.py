@@ -27,7 +27,7 @@
     ```
 """
 
-from threading import Lock
+from threading import Lock as ThreadLock
 from typing import Any, Literal, cast
 
 from src.kernel.config import ConfigBase, SectionBase, config_section, Field
@@ -75,26 +75,26 @@ class APIProviderSection(SectionBase):
     )
 
     # 私有属性，用于密钥轮询
-    _api_key_lock: Lock | None = None
+    _api_key_lock: "ThreadLock | None" = None
     _api_key_index: int = 0
 
     def model_post_init(self, __context: Any) -> None:
         """初始化后处理"""
         super().model_post_init(__context)
-        self._api_key_lock = Lock()
+        self._api_key_lock = ThreadLock()
         self._api_key_index = 0
 
     def get_api_key(self) -> str:
         """获取 API 密钥（支持轮询）
-        
+
         Returns:
             str: API 密钥
-            
+
         Raises:
             ValueError: 如果密钥列表为空
         """
         if self._api_key_lock is None:
-            self._api_key_lock = Lock()
+            self._api_key_lock = ThreadLock()
             
         with self._api_key_lock:
             if isinstance(self.api_key, str):

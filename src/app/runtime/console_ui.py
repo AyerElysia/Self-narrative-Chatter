@@ -237,7 +237,7 @@ class ConsoleUIManager:
             # 用 Panel 包裹居中的 ASCII 艺术字
             self.console.print(
                 Panel(
-                    Align.center(Text(ascii_art.rstrip(), style="cyan bold")),
+                    Align.center(Text(ascii_art.rstrip()+"\n", style="cyan bold")),
                     box=ROUNDED,
                     border_style="cyan",
                     padding=(0, 2),

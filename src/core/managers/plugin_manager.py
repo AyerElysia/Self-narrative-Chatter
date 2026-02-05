@@ -8,6 +8,7 @@ src.core.components.loader.PluginLoader 负责。
 
 import importlib.util
 import inspect
+import shutil
 import sys
 import tempfile
 import zipfile
@@ -54,6 +55,7 @@ class PluginManager:
         self._manifests: dict[str, PluginManifest] = {}
         self._plugin_paths: dict[str, str] = {}
         self._failed_plugins: dict[str, str] = {}
+        self._archive_tmpdirs: dict[str, str] = {}  # 压缩包插件解压临时目录
 
         logger.info("插件管理器初始化完成")
 
@@ -200,6 +202,14 @@ class PluginManager:
             # 从全局注册表中移除该插件的组件
             await self._unregister_plugin_components(plugin_name)
 
+            # 清理压缩包插件的临时目录
+            if plugin_name in self._archive_tmpdirs:
+                tmpdir = self._archive_tmpdirs.pop(plugin_name)
+                try:
+                    shutil.rmtree(tmpdir, ignore_errors=True)
+                except Exception as e:
+                    logger.warning(f"清理临时目录失败 ({tmpdir}): {e}")
+
             # 移除引用
             del self._loaded_plugins[plugin_name]
             if plugin_name in self._manifests:
@@ -340,6 +350,12 @@ class PluginManager:
     async def _load_from_archive(self, archive_path: str, manifest: PluginManifest) -> Any | None:
         """从 ZIP/MFP 加载插件模块。
 
+        支持两种打包格式：
+        1. manifest.json 直接在 zip 根级
+        2. 带一层子目录前缀（如 plugin_name/manifest.json）
+
+        提取后的临时目录不会被立即删除，以保证插件运行时子模块导入正常。
+
         Args:
             archive_path: 压缩包路径
             manifest: 插件清单
@@ -348,38 +364,72 @@ class PluginManager:
             加载的模块对象，失败返回 None
         """
         try:
+            # 创建持久化临时目录（不使用 with 块，避免提前删除）
+            tmpdir = tempfile.mkdtemp(prefix=f"mofox_plugin_{manifest.name}_")
+
             with zipfile.ZipFile(archive_path, 'r') as zf:
-                # 提取到临时目录
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    zf.extractall(tmpdir)
+                zf.extractall(tmpdir)
 
-                    # 添加到 sys.path
-                    sys.path.insert(0, tmpdir)
+                # 确定插件根目录：可能是 tmpdir 本身或其中的子目录
+                plugin_root = Path(tmpdir)
+                entry_point = plugin_root / manifest.entry_point
 
-                    try:
-                        # 动态导入
-                        entry_point = Path(tmpdir) / manifest.entry_point
-                        if not entry_point.exists():
-                            logger.error(f"入口点不存在: {manifest.entry_point}")
-                            return None
+                if not entry_point.exists():
+                    # zip 内有一层子目录前缀，在子目录中查找入口点
+                    for sub in plugin_root.iterdir():
+                        if sub.is_dir():
+                            candidate = sub / manifest.entry_point
+                            if candidate.exists():
+                                plugin_root = sub
+                                entry_point = candidate
+                                break
 
-                        spec = importlib.util.spec_from_file_location(
-                            manifest.name,
-                            str(entry_point)
-                        )
-                        if spec is None or spec.loader is None:
-                            logger.error(f"无法创建模块规范: {entry_point}")
-                            return None
+                if not entry_point.exists():
+                    logger.error(
+                        f"入口点不存在: {manifest.entry_point} (archive: {archive_path})"
+                    )
+                    return None
 
-                        module = importlib.util.module_from_spec(spec)
-                        sys.modules[manifest.name] = module
-                        spec.loader.exec_module(module)
+            # 将插件根的父目录添加到 sys.path（使包导入正常工作）
+            parent_dir = str(plugin_root.parent)
+            sys.path.insert(0, parent_dir)
 
-                        return module
-                    finally:
-                        # 从 sys.path 移除
-                        if tmpdir in sys.path:
-                            sys.path.remove(tmpdir)
+            try:
+                # 构建模块名
+                package_name = plugin_root.name
+                entry_relative = entry_point.relative_to(plugin_root)
+                module_parts = list(entry_relative.parts[:-1]) + [entry_relative.stem]
+                module_name = f"{package_name}.{'.'.join(module_parts)}"
+
+                spec = importlib.util.spec_from_file_location(
+                    module_name,
+                    str(entry_point),
+                    submodule_search_locations=[str(plugin_root)],
+                )
+                if spec is None or spec.loader is None:
+                    logger.error(f"无法创建模块规范: {entry_point}")
+                    return None
+
+                module = importlib.util.module_from_spec(spec)
+
+                # 设置 __package__ 以支持相对导入
+                if '.' in module_name:
+                    module.__package__ = module_name.rsplit('.', 1)[0]
+                else:
+                    module.__package__ = package_name
+
+                sys.modules[module_name] = module
+                spec.loader.exec_module(module)
+
+                # 记录临时目录路径，供后续卸载时清理
+                self._archive_tmpdirs[manifest.name] = tmpdir
+
+                return module
+            except Exception:
+                # 加载失败时从 sys.path 移除并记录
+                if parent_dir in sys.path:
+                    sys.path.remove(parent_dir)
+                raise
 
         except Exception as e:
             logger.error(f"从压缩包加载插件模块失败 ({archive_path}): {e}")

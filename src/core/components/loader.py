@@ -20,6 +20,47 @@ from src.kernel.logger import get_logger
 
 logger = get_logger("plugin_loader")
 
+
+def _find_manifest_in_zip(zf: zipfile.ZipFile) -> str | None:
+    """在 ZIP 中查找 manifest.json，支持根级和一级子目录。
+
+    常见的打包方式有两种：
+    1. manifest.json 直接在 zip 根级
+    2. plugin_name/manifest.json（带一层子目录前缀）
+
+    Returns:
+        manifest.json 在 zip 内的路径，未找到返回 None
+    """
+    namelist = zf.namelist()
+    # 1) 根级
+    if "manifest.json" in namelist:
+        return "manifest.json"
+    # 2) 一级子目录
+    for name in namelist:
+        # 匹配 "xxx/manifest.json" 形式
+        parts = name.replace("\\", "/").split("/")
+        if len(parts) == 2 and parts[1] == "manifest.json":
+            return name
+    return None
+
+
+def _get_zip_root_prefix(zf: zipfile.ZipFile) -> str:
+    """获取 ZIP 内的根目录前缀（如果存在）。
+
+    如果 zip 内所有内容都在同一个子目录下，返回该子目录名（含尾部 /）；
+    否则返回空字符串。
+    """
+    namelist = zf.namelist()
+    if not namelist:
+        return ""
+    # 检查是否所有条目都以同一前缀开头
+    first = namelist[0]
+    if "/" in first:
+        prefix = first.split("/")[0] + "/"
+        if all(n.startswith(prefix) for n in namelist):
+            return prefix
+    return ""
+
 if TYPE_CHECKING:
     from src.core.components.base.plugin import BasePlugin
     from src.core.managers.plugin_manager import PluginManager
@@ -220,10 +261,11 @@ async def load_manifest(plugin_path: str) -> PluginManifest | None:
     try:
         if plugin_path.endswith((".zip", ".mfp")):
             with zipfile.ZipFile(plugin_path, "r") as zf:
-                if "manifest.json" not in zf.namelist():
+                manifest_entry = _find_manifest_in_zip(zf)
+                if manifest_entry is None:
                     logger.error(f"manifest.json 不存在: {plugin_path}")
                     return None
-                manifest_data = json.loads(zf.read("manifest.json").decode("utf-8"))
+                manifest_data = json.loads(zf.read(manifest_entry).decode("utf-8"))
         else:
             manifest_file = Path(plugin_path) / "manifest.json"
             if not manifest_file.exists():
@@ -308,7 +350,7 @@ class PluginLoader:
             elif item.suffix in (".zip", ".mfp"):
                 try:
                     with zipfile.ZipFile(item, "r") as zf:
-                        if "manifest.json" in zf.namelist():
+                        if _find_manifest_in_zip(zf) is not None:
                             discovered.append(str(item))
                             logger.debug(f"发现插件压缩包: {item}")
                 except Exception as e:

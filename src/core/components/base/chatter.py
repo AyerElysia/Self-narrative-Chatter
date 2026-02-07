@@ -4,6 +4,8 @@
 Chatter 是 Bot 的智能核心，定义对话逻辑和流程。
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, AsyncGenerator, cast

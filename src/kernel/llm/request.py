@@ -27,10 +27,6 @@ from .policy.base import Policy
 from .response import LLMResponse
 from .roles import ROLE
 from .types import ModelEntry, ModelSet
-from src.kernel.logger import get_logger
-
-
-logger = get_logger("llm_request")
 
 
 def _normalize_tool_result_payload(payload: LLMPayload) -> LLMPayload:

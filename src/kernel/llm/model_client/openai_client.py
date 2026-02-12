@@ -4,6 +4,7 @@ import base64
 import json
 import asyncio
 import threading
+import inspect
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -14,6 +15,27 @@ from ..payload import Image, LLMPayload, Text, ToolCall, ToolResult
 from ..roles import ROLE
 from ..exceptions import LLMError
 from .base import StreamEvent
+
+
+def _build_httpx_timeout(timeout: float | None):
+    import httpx
+
+    if not isinstance(timeout, (int, float)):
+        return None
+
+    total = float(timeout)
+    if total <= 0:
+        return None
+
+    connect_timeout = min(total, 10.0)
+    pool_timeout = min(total, 5.0)
+    return httpx.Timeout(
+        timeout=total,
+        connect=connect_timeout,
+        read=total,
+        write=total,
+        pool=pool_timeout,
+    )
 
 
 def _is_data_url(value: str) -> bool:
@@ -179,11 +201,14 @@ class OpenAIChatClient:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._clients: dict[tuple[str, str | None, int, float | None], Any] = {}
+        self._clients: dict[
+            tuple[str, str | None, int, float | None, bool, bool], Any
+        ] = {}
         self._sync_clients: dict[
             tuple[str, str | None, float | None, bool, bool], Any
         ] = {}
         self._sync_http_executors: dict[int, ThreadPoolExecutor] = {}
+        self._platform_info: Any = None
 
     def _get_loop_key(self) -> int:
         try:
@@ -191,6 +216,23 @@ class OpenAIChatClient:
             return id(loop)
         except RuntimeError:
             return 0
+
+    def _ensure_openai_platform_info(self) -> Any:
+        with self._lock:
+            if self._platform_info is not None:
+                return self._platform_info
+
+        try:
+            from openai._base_client import get_platform
+
+            platform_info = get_platform()
+        except Exception:
+            platform_info = None
+
+        with self._lock:
+            if self._platform_info is None:
+                self._platform_info = platform_info
+            return self._platform_info
 
     def _get_client(
         self,
@@ -222,8 +264,13 @@ class OpenAIChatClient:
                 response = await self._inner.handle_async_request(request)
                 return response
 
-        limits = None
+        limits = httpx.Limits(
+            max_connections=100,
+            max_keepalive_connections=5,
+            keepalive_expiry=10.0,
+        )
         headers = None
+        timeout_config = _build_httpx_timeout(timeout)
 
         base_transport = (
             httpx.AsyncHTTPTransport(local_address="0.0.0.0")
@@ -235,6 +282,8 @@ class OpenAIChatClient:
             "transport": transport,
             "trust_env": trust_env,
         }
+        if timeout_config is not None:
+            http_client_kwargs["timeout"] = timeout_config
         if limits:
             http_client_kwargs["limits"] = limits
         if headers:
@@ -250,9 +299,30 @@ class OpenAIChatClient:
         kwargs["max_retries"] = 0
 
         client = AsyncOpenAI(**kwargs)
+        try:
+            platform_info = self._ensure_openai_platform_info()
+            if platform_info is not None:
+                client._platform = platform_info
+        except Exception:
+            pass
         with self._lock:
             self._clients[cache_key] = client
         return client
+
+    def _evict_async_client(
+        self,
+        *,
+        api_key: str,
+        base_url: str | None,
+        timeout: float | None,
+        trust_env: bool,
+        force_ipv4: bool,
+    ) -> Any | None:
+        loop_key = self._get_loop_key()
+        timeout_key = float(timeout) if isinstance(timeout, (int, float)) else None
+        cache_key = (api_key, base_url, loop_key, timeout_key, trust_env, force_ipv4)
+        with self._lock:
+            return self._clients.pop(cache_key, None)
 
     def _get_sync_client(
         self,
@@ -278,7 +348,14 @@ class OpenAIChatClient:
             if force_ipv4
             else httpx.HTTPTransport()
         )
-        http_client = httpx.Client(transport=transport, trust_env=trust_env)
+        http_client_kwargs: dict[str, Any] = {
+            "transport": transport,
+            "trust_env": trust_env,
+        }
+        timeout_config = _build_httpx_timeout(timeout)
+        if timeout_config is not None:
+            http_client_kwargs["timeout"] = timeout_config
+        http_client = httpx.Client(**http_client_kwargs)
 
         kwargs: dict[str, Any] = {"api_key": api_key, "http_client": http_client}
         if base_url:
@@ -288,6 +365,12 @@ class OpenAIChatClient:
         kwargs["max_retries"] = 0
 
         client = OpenAI(**kwargs)
+        try:
+            platform_info = self._ensure_openai_platform_info()
+            if platform_info is not None:
+                client._platform = platform_info
+        except Exception:
+            pass
         with self._lock:
             self._sync_clients[cache_key] = client
         return client
@@ -418,7 +501,33 @@ class OpenAIChatClient:
             return msg.content or "", tool_calls, None
 
         if not stream:
-            resp = await client.chat.completions.create(**params)
+            try:
+                resp = await client.chat.completions.create(**params)
+            except Exception as e:
+                err_name = type(e).__name__.lower()
+                err_text = str(e).lower()
+                if (
+                    "timeout" in err_name
+                    or "timeout" in err_text
+                    or "connect" in err_name
+                    or "network" in err_name
+                    or "transport" in err_name
+                ):
+                    stale = self._evict_async_client(
+                        api_key=api_key,
+                        base_url=base_url,
+                        timeout=float(timeout)
+                        if isinstance(timeout, (int, float))
+                        else None,
+                        trust_env=trust_env,
+                        force_ipv4=force_ipv4,
+                    )
+                    if stale is not None:
+                        try:
+                            await stale.close()
+                        except Exception:
+                            pass
+                raise
             if not resp.choices:
                 raise LLMError(f"OpenAI API returned an empty choices list. Response: {resp}")
             msg = resp.choices[0].message
@@ -459,35 +568,47 @@ class OpenAIChatClient:
         stream_resp = await client.chat.completions.create(**params, stream=True)
 
         async def iter_events() -> AsyncIterator[StreamEvent]:
-            async for chunk in stream_resp:
-                if not chunk.choices:
-                    continue
-                choice = chunk.choices[0]
-                delta = choice.delta
+            try:
+                async for chunk in stream_resp:
+                    if not chunk.choices:
+                        continue
+                    choice = chunk.choices[0]
+                    delta = choice.delta
 
-                content = getattr(delta, "content", None)
-                if content:
-                    yield StreamEvent(text_delta=content)
+                    content = getattr(delta, "content", None)
+                    if content:
+                        yield StreamEvent(text_delta=content)
 
-                # 工具调用增量：可能分段传 arguments
-                tool_calls_delta = getattr(delta, "tool_calls", None)
-                if tool_calls_delta:
-                    for tc in tool_calls_delta:
-                        fn = getattr(tc, "function", None)
+                    # 工具调用增量：可能分段传 arguments
+                    tool_calls_delta = getattr(delta, "tool_calls", None)
+                    if tool_calls_delta:
+                        for tc in tool_calls_delta:
+                            fn = getattr(tc, "function", None)
+                            yield StreamEvent(
+                                tool_call_id=getattr(tc, "id", None),
+                                tool_name=getattr(fn, "name", None) if fn else None,
+                                tool_args_delta=(
+                                    getattr(fn, "arguments", None) if fn else None
+                                ),
+                            )
+
+                    function_call_delta = getattr(delta, "function_call", None)
+                    if function_call_delta and not tool_calls_delta:
                         yield StreamEvent(
-                            tool_call_id=getattr(tc, "id", None),
-                            tool_name=getattr(fn, "name", None) if fn else None,
-                            tool_args_delta=(
-                                getattr(fn, "arguments", None) if fn else None
-                            ),
+                            tool_call_id="function_call",
+                            tool_name=getattr(function_call_delta, "name", None),
+                            tool_args_delta=getattr(function_call_delta, "arguments", None),
                         )
+            finally:
+                close = getattr(stream_resp, "aclose", None)
+                if callable(close):
+                    maybe_awaitable = close()
+                    if inspect.isawaitable(maybe_awaitable):
+                        await maybe_awaitable
+                    return
 
-                function_call_delta = getattr(delta, "function_call", None)
-                if function_call_delta and not tool_calls_delta:
-                    yield StreamEvent(
-                        tool_call_id="function_call",
-                        tool_name=getattr(function_call_delta, "name", None),
-                        tool_args_delta=getattr(function_call_delta, "arguments", None),
-                    )
+                close_sync = getattr(stream_resp, "close", None)
+                if callable(close_sync):
+                    close_sync()
 
         return None, None, iter_events()

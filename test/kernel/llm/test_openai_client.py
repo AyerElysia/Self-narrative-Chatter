@@ -5,6 +5,7 @@
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from typing import cast, Any
 
 import pytest
 
@@ -470,4 +471,78 @@ class TestOpenAIChatClient:
         call_kwargs = mock_chat.completions.create.call_args.kwargs
         assert call_kwargs["top_p"] == 0.9
         assert call_kwargs["presence_penalty"] == 0.1
+
+    @pytest.mark.asyncio
+    async def test_stream_iterator_closes_underlying_stream_on_early_stop(self):
+        """测试流式响应提前停止消费时会关闭底层流对象。"""
+        from src.kernel.llm.model_client.openai_client import OpenAIChatClient
+
+        class FakeStream:
+            def __init__(self):
+                self._index = 0
+                self.closed = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self._index > 0:
+                    raise StopAsyncIteration
+                self._index += 1
+
+                delta = MagicMock()
+                delta.content = "hello"
+                delta.tool_calls = None
+                delta.function_call = None
+
+                choice = MagicMock()
+                choice.delta = delta
+
+                chunk = MagicMock()
+                chunk.choices = [choice]
+                return chunk
+
+            async def aclose(self):
+                self.closed = True
+
+        fake_stream = FakeStream()
+
+        mock_chat = AsyncMock()
+        mock_chat.completions.create = AsyncMock(return_value=fake_stream)
+
+        mock_openai_client = MagicMock()
+        mock_openai_client.chat.completions.create = mock_chat.completions.create
+
+        client = OpenAIChatClient()
+        client._clients = {}
+        client._get_client = MagicMock(return_value=mock_openai_client)
+
+        payloads = [LLMPayload(ROLE.USER, Text("Hi"))]
+        model_set = {
+            "api_key": "test-key",
+            "base_url": None,
+            "timeout": 30.0,
+            "max_tokens": 100,
+            "temperature": 0.7,
+            "extra_params": {},
+        }
+
+        message, tool_calls, stream_iter = await client.create(
+            model_name="gpt-4",
+            payloads=payloads,
+            tools=[],
+            request_name="test",
+            model_set=model_set,
+            stream=True,
+        )
+
+        assert message is None
+        assert tool_calls is None
+        assert stream_iter is not None
+
+        event = await anext(stream_iter)
+        assert event.text_delta == "hello"
+
+        await cast(Any, stream_iter).aclose()
+        assert fake_stream.closed is True
 

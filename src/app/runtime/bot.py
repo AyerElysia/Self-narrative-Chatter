@@ -6,8 +6,13 @@ Neo-MoFox 框架的核心协调器，负责系统初始化、插件加载和生�
 from __future__ import annotations
 
 import asyncio
+import socket
+import tomllib
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 from src.core.config import CORE_VERSION
 
@@ -119,6 +124,9 @@ class Bot:
             # 显示启动横幅
             self.ui.show_banner(self.bot_version, self.bot_name)
 
+            # 启动前优化 async 连接池/DNS 行为
+            await self._optimize_async_network_runtime()
+
             # Phase 1: Kernel 初始化
             await self._initialize_kernel()
 
@@ -150,6 +158,89 @@ class Bot:
         except Exception as e:
             self.ui.display_error(f"Initialization failed: {e}", e)
             raise BotInitializationError(str(e), "unknown") from e
+
+    async def _optimize_async_network_runtime(self) -> None:
+        """优化异步网络运行时：线程池与 DNS 预解析。"""
+        loop = asyncio.get_running_loop()
+
+        # 默认线程池：承载 to_thread / run_in_executor(None, ...)
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=128))
+
+        # DNS 专用线程池：避免 getaddrinfo 被通用任务挤占
+        dns_executor = ThreadPoolExecutor(max_workers=16)
+
+        async def _patched_getaddrinfo(host, port, *args, **kwargs):
+            func = partial(socket.getaddrinfo, host, port, *args, **kwargs)
+            return await loop.run_in_executor(dns_executor, func)
+
+        async def _patched_getnameinfo(sockaddr, flags=0):
+            func = partial(socket.getnameinfo, sockaddr, flags)
+            return await loop.run_in_executor(dns_executor, func)
+
+        loop.getaddrinfo = _patched_getaddrinfo  # type: ignore[method-assign]
+        loop.getnameinfo = _patched_getnameinfo  # type: ignore[method-assign]
+
+        # 预解析 provider 域名，减少首包抖动
+        targets = self._extract_provider_hosts_from_model_config("config/model.toml")
+        if not targets:
+            return
+
+        async def _resolve(host: str, port: int) -> None:
+            try:
+                await asyncio.wait_for(
+                    loop.getaddrinfo(host, port, type=socket.SOCK_STREAM),
+                    timeout=5.0,
+                )
+            except Exception:
+                return
+
+        await asyncio.gather(
+            *(_resolve(host, port) for host, port in targets),
+            return_exceptions=True,
+        )
+
+    @staticmethod
+    def _extract_provider_hosts_from_model_config(
+        model_config_path: str,
+    ) -> list[tuple[str, int]]:
+        """从模型配置提取 provider 的 (host, port) 列表。"""
+        try:
+            with open(model_config_path, "rb") as f:
+                config = tomllib.load(f)
+        except Exception:
+            return []
+
+        providers = config.get("api_providers", [])
+        if not isinstance(providers, list):
+            return []
+
+        out: list[tuple[str, int]] = []
+        seen: set[tuple[str, int]] = set()
+        for item in providers:
+            if not isinstance(item, dict):
+                continue
+            base_url = item.get("base_url")
+            if not isinstance(base_url, str) or not base_url:
+                continue
+
+            parsed = urlparse(base_url)
+            host = parsed.hostname
+            if not host:
+                continue
+
+            if parsed.port is not None:
+                port = parsed.port
+            elif parsed.scheme == "https":
+                port = 443
+            else:
+                port = 80
+
+            key = (host, int(port))
+            if key not in seen:
+                seen.add(key)
+                out.append(key)
+
+        return out
 
     async def _initialize_kernel(self) -> None:
         """初始化 Kernel 层（9 步）

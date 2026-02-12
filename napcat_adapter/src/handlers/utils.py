@@ -3,6 +3,7 @@ import io
 import ssl
 import time
 import weakref
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 import orjson
@@ -256,13 +257,17 @@ async def get_image_base64(url: str) -> str:
     # sourcery skip: raise-specific-error
     """下载图片/视频并返回Base64"""
     logger.debug(f"下载图片: {url}")
-    http = SSLAdapter()
-    try:
+
+    def _download_sync() -> str:
+        http = SSLAdapter()
         response = http.request("GET", url, timeout=10)
         if response.status != 200:
             raise Exception(f"HTTP Error: {response.status}")
         image_bytes = response.data
         return base64.b64encode(image_bytes).decode("utf-8")
+
+    try:
+        return await asyncio.to_thread(_download_sync)
     except Exception as e:
         logger.error(f"图片下载失败: {e!s}")
         raise

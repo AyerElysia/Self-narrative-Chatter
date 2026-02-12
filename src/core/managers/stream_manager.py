@@ -119,40 +119,46 @@ class StreamManager:
                 group_id=group_id,
             )
 
-        # 检查是否已存在流实例（全局单例）
-        if stream_id in self._streams:
-            logger.debug(f"获取已存在的流实例: {stream_id}")
-            return self._streams[stream_id]
+        # 并发保护：同一个 stream_id 的创建/加载必须串行化
+        lock = self._get_stream_lock(stream_id)
+        async with lock:
+            # 二次检查，避免等待锁期间已被其他协程创建
+            existed = self._streams.get(stream_id)
+            if existed is not None:
+                logger.debug(f"获取已存在的流实例: {stream_id}")
+                return existed
 
-        # 查询数据库
-        stream_record = await self._streams_crud.get_by(stream_id=stream_id)
+            # 查询数据库
+            stream_record = await self._streams_crud.get_by(stream_id=stream_id)
 
-        if stream_record:
-            # 从数据库构建流
-            logger.debug(f"从数据库加载流: {stream_id}")
-            chat_stream = await self.build_stream_from_database(stream_id)
-            if not chat_stream:
-                # 数据库记录存在但构建失败，创建新的
+            if stream_record:
+                # 从数据库构建流
+                logger.debug(f"从数据库加载流: {stream_id}")
+                chat_stream = await self.build_stream_from_database(stream_id)
+                if not chat_stream:
+                    # 数据库记录存在但构建失败，创建新的
+                    chat_stream = await self._create_new_stream(
+                        stream_id=stream_id,
+                        platform=platform,
+                        user_id=user_id,
+                        group_id=group_id,
+                        chat_type=chat_type,
+                    )
+            else:
+                # 创建新流
+                logger.debug(f"创建新流: {stream_id}")
                 chat_stream = await self._create_new_stream(
+                    stream_id=stream_id,
                     platform=platform,
                     user_id=user_id,
                     group_id=group_id,
                     chat_type=chat_type,
                 )
-        else:
-            # 创建新流
-            logger.debug(f"创建新流: {stream_id}")
-            chat_stream = await self._create_new_stream(
-                platform=platform,
-                user_id=user_id,
-                group_id=group_id,
-                chat_type=chat_type,
-            )
 
-        # 存储到全局单例字典
-        self._streams[stream_id] = chat_stream
+            # 存储到全局单例字典
+            self._streams[stream_id] = chat_stream
 
-        return chat_stream
+            return chat_stream
 
     async def build_stream_from_database(self, stream_id: str) -> "ChatStream | None":
         """从数据库记录构建 ChatStream。
@@ -484,6 +490,7 @@ class StreamManager:
         chat_type: str = "private",
         user_id: str = "",
         group_id: str = "",
+        stream_id: str = "",
     ) -> "ChatStream":
         """创建新流。
 
@@ -500,11 +507,12 @@ class StreamManager:
         from src.core.utils.user_query_helper import get_user_query_helper
 
         # 生成 stream_id
-        stream_id = ChatStream.generate_stream_id(
-            platform=platform,
-            user_id=user_id,
-            group_id=group_id,
-        )
+        if not stream_id:
+            stream_id = ChatStream.generate_stream_id(
+                platform=platform,
+                user_id=user_id,
+                group_id=group_id,
+            )
 
         if user_id:
             person_id = get_user_query_helper().generate_person_id(

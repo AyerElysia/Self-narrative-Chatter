@@ -122,10 +122,16 @@ class ConfigManager:
     
     def create_models_tab(self):
         # Treeview for models
-        self.models_tree = ttk.Treeview(self.models_frame, columns=("name", "identifier", "provider", "price_in", "price_out"), show="headings")
+        self.models_tree = ttk.Treeview(
+            self.models_frame,
+            columns=("name", "identifier", "provider", "max_context", "tool_call_compat", "price_in", "price_out"),
+            show="headings"
+        )
         self.models_tree.heading("name", text="名称")
         self.models_tree.heading("identifier", text="标识符")
         self.models_tree.heading("provider", text="提供商")
+        self.models_tree.heading("max_context", text="最大上下文")
+        self.models_tree.heading("tool_call_compat", text="Tool兼容")
         self.models_tree.heading("price_in", text="输入价格")
         self.models_tree.heading("price_out", text="输出价格")
         # 配置错误标签样式
@@ -319,6 +325,32 @@ class ConfigManager:
             if not provider or provider not in provider_names:
                 error_fields.append(2)  # provider列索引
                 errors.append(f"模型 '{name}' 使用了不存在的提供商 '{provider}'")
+
+            max_context = model.get("max_context")
+            if max_context is not None and (not isinstance(max_context, int) or max_context <= 0):
+                error_fields.append(3)  # max_context列索引
+                errors.append(f"模型 '{name}' 的max_context必须是大于0的整数")
+
+            tool_call_compat = model.get("tool_call_compat")
+            if tool_call_compat is not None and not isinstance(tool_call_compat, bool):
+                error_fields.append(4)  # tool_call_compat列索引
+                errors.append(f"模型 '{name}' 的tool_call_compat必须是布尔值")
+
+            extra_params = model.get("extra_params")
+            if extra_params is not None:
+                if not isinstance(extra_params, dict):
+                    error_fields.append(5)
+                    errors.append(f"模型 '{name}' 的extra_params必须是字典")
+                else:
+                    reserve_ratio = extra_params.get("context_reserve_ratio")
+                    if reserve_ratio is not None and not isinstance(reserve_ratio, (int, float)):
+                        error_fields.append(5)
+                        errors.append(f"模型 '{name}' 的extra_params.context_reserve_ratio必须是数字")
+
+                    reserve_tokens = extra_params.get("context_reserve_tokens")
+                    if reserve_tokens is not None and not isinstance(reserve_tokens, int):
+                        error_fields.append(5)
+                        errors.append(f"模型 '{name}' 的extra_params.context_reserve_tokens必须是整数")
             
             if error_fields:
                 problematic_items['models'][name] = error_fields
@@ -452,11 +484,13 @@ class ConfigManager:
                 name = model.get("name", "")
                 identifier = model.get("model_identifier", "")
                 provider = model.get("api_provider", "")
+                max_context = model.get("max_context", 32768)
+                tool_call_compat = model.get("tool_call_compat", False)
                 price_in = model.get("price_in", 0)
                 price_out = model.get("price_out", 0)
                 
                 item = self.models_tree.insert("", tk.END, values=(
-                    name, identifier, provider, price_in, price_out
+                    name, identifier, provider, max_context, "是" if tool_call_compat else "否", price_in, price_out
                 ))
         
         # 更新模型任务
@@ -619,13 +653,21 @@ class ConfigManager:
         price_out_entry = ttk.Entry(dialog)
         price_out_entry.insert(0, "0")
         price_out_entry.grid(row=4, column=1, padx=5, pady=5, sticky=tk.W+tk.E)
+
+        ttk.Label(dialog, text="最大上下文Token:").grid(row=5, column=0, padx=5, pady=5, sticky=tk.E)
+        max_context_entry = ttk.Entry(dialog)
+        max_context_entry.insert(0, "32768")
+        max_context_entry.grid(row=5, column=1, padx=5, pady=5, sticky=tk.W+tk.E)
         
         force_stream_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(dialog, text="强制流式模式", variable=force_stream_var).grid(row=5, column=0, columnspan=2, pady=5, sticky=tk.W)
+        ttk.Checkbutton(dialog, text="强制流式模式", variable=force_stream_var).grid(row=6, column=0, columnspan=2, pady=5, sticky=tk.W)
+
+        tool_call_compat_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(dialog, text="启用Tool Call兼容模式", variable=tool_call_compat_var).grid(row=7, column=0, columnspan=2, pady=5, sticky=tk.W)
         
         # Enhanced extra params section
         extra_params_frame = ttk.LabelFrame(dialog, text="额外参数 (TOML格式)", padding=5)
-        extra_params_frame.grid(row=6, column=0, columnspan=2, padx=5, pady=5, sticky=tk.W+tk.E+tk.N+tk.S)
+        extra_params_frame.grid(row=8, column=0, columnspan=2, padx=5, pady=5, sticky=tk.W+tk.E+tk.N+tk.S)
         
         # Text widget with syntax highlighting
         extra_params_text = tk.Text(extra_params_frame, height=6, width=50, wrap=tk.NONE)
@@ -673,7 +715,10 @@ class ConfigManager:
                     price_in_entry.insert(0, str(model.get("price_in", 0)))
                     price_out_entry.delete(0, tk.END)
                     price_out_entry.insert(0, str(model.get("price_out", 0)))
+                    max_context_entry.delete(0, tk.END)
+                    max_context_entry.insert(0, str(model.get("max_context", 32768)))
                     force_stream_var.set(model.get("force_stream_mode", False))
+                    tool_call_compat_var.set(model.get("tool_call_compat", False))
                     
                     # Populate extra params if they exist
                     if "extra_params" in model:
@@ -682,19 +727,41 @@ class ConfigManager:
         
         # Buttons
         btn_frame = ttk.Frame(dialog)
-        btn_frame.grid(row=7, column=0, columnspan=2, pady=10)
+        btn_frame.grid(row=9, column=0, columnspan=2, pady=10)
         
         def save_model():
-            model = {
+            try:
+                max_context = int(max_context_entry.get())
+            except ValueError:
+                messagebox.showerror("错误", "max_context 必须是整数")
+                return
+            if max_context <= 0:
+                messagebox.showerror("错误", "max_context 必须大于0")
+                return
+
+            existing_model = {}
+            if item:
+                old_name = self.models_tree.item(item, "values")[0]
+                for m in self.config_data.get("models", []):
+                    if m.get("name") == old_name:
+                        existing_model = dict(m)
+                        break
+
+            model = dict(existing_model)
+            model.update({
                 "name": name_entry.get(),
                 "model_identifier": id_entry.get(),
                 "api_provider": provider_var.get(),
                 "price_in": float(price_in_entry.get()),
-                "price_out": float(price_out_entry.get())
-            }
+                "price_out": float(price_out_entry.get()),
+                "max_context": max_context,
+                "tool_call_compat": bool(tool_call_compat_var.get()),
+            })
             
             if force_stream_var.get():
                 model["force_stream_mode"] = True
+            elif "force_stream_mode" in model:
+                model["force_stream_mode"] = False
                 
             # Handle extra params
             extra_params = extra_params_text.get("1.0", tk.END).strip()
@@ -704,6 +771,8 @@ class ConfigManager:
                 except Exception as e:
                     messagebox.showerror("错误", f"解析额外参数失败: {str(e)}")
                     return
+            elif "extra_params" in model:
+                model.pop("extra_params", None)
             
             if "models" not in self.config_data:
                 self.config_data["models"] = []
@@ -780,6 +849,8 @@ class ConfigManager:
         example = """# 示例额外参数配置
 enable_thinking = false  # 禁用思考
 thinking_budget = 256  # 最大思考token
+context_reserve_ratio = 0.1  # 上下文预留比例
+context_reserve_tokens = 512  # 上下文固定预留token
 """
         text_widget.delete("1.0", tk.END)
         text_widget.insert("1.0", example)

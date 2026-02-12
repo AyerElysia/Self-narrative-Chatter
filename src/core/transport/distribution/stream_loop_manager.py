@@ -274,23 +274,22 @@ class StreamLoopManager:
 
         wait_until = wait_state.get("wait_until")
         wait_for_messages = wait_state.get("wait_for_messages", False)
+        unread_count_at_wait = int(wait_state.get("unread_count_at_wait", 0))
 
-        should_resume = False
-        
-        # 情况 1: time 非 None, 检查时间到了没
+        now = time.time()
+
+        # 条件 1：时间条件（未设置则视为满足）
+        time_ready = True
         if wait_until is not None:
-            if time.time() >= wait_until:
-                should_resume = True
-        
-        # 情况 2: time 为 None (或 Stop 状态强制) 且 wait_for_messages 为 True，检查是否有新消息
-        # 注意：如果既有 wait_until 又有 wait_for_messages (如 Stop)，通常任一满足即可?
-        # 根据用户需求："time非None则检查时间到了没，为None则检查是否有新消息"
-        # 为严格遵循指令：
-        elif wait_for_messages:
-            if context.unread_messages:
-                should_resume = True
+            time_ready = now >= wait_until
 
-        if should_resume:
+        # 条件 2：消息条件（未要求则视为满足）
+        message_ready = True
+        if wait_for_messages:
+            message_ready = len(context.unread_messages) > unread_count_at_wait
+
+        # 语义：当两个条件都存在时，需同时满足；否则满足已启用的条件即可
+        if time_ready and message_ready:
             self._wait_states.pop(stream_id, None)
             return True
 

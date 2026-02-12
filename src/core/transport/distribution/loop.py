@@ -184,10 +184,12 @@ async def run_chat_stream(
                         }
                         logger.debug(f"[驱动器] stream={stream_id[:8]}, 进入 Wait 状态 (time={result.time})")
                     elif isinstance(result, Stop):
-                        # 记录等待状态并销毁生成器
+                        # 记录等待状态并销毁生成器。
+                        # Stop 语义：经过冷却后，仅当出现“新的未读消息”才重启对话。
                         manager._wait_states[stream_id] = {
                             "wait_until": time.time() + result.time,
-                            "wait_for_messages": True
+                            "wait_for_messages": True,
+                            "unread_count_at_wait": len(context.unread_messages),
                         }
                         logger.debug(f"[驱动器] stream={stream_id[:8]}, 进入 Stop 状态 (time={result.time})，销毁生成器")
                         manager._chatter_genes.pop(stream_id, None)

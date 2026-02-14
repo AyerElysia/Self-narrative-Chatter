@@ -7,6 +7,7 @@
 - 适配器传入的媒体数据（图片、语音等）**已经是 base64 编码**，转换器不做下载。
 - 嵌套 seglist 最多递归 3 层，超出以占位符替代。
 - 单个段解析失败不影响整体，用占位符保留位置。
+- 图片和表情包会通过 VLM 识别转换为文字描述。
 """
 
 from __future__ import annotations
@@ -81,6 +82,8 @@ class MessageConverter:
     """MessageEnvelope ↔ Message 双向转换器。
 
     实例无状态，可以作为单例在整个应用中复用。
+    
+    支持 VLM 图片识别功能，将图片和表情包转换为文字描述。
 
     Examples:
         >>> converter = MessageConverter()
@@ -123,6 +126,10 @@ class MessageConverter:
 
         # 递归解析段列表
         result = self._parse_segments(segments, depth=0)
+        
+        # 如果启用了 VLM，对图片和表情包进行识别
+        if  result.media:
+            result = await self._recognize_media_with_vlm(result)
 
         # 确定消息类型
         message_type = self._infer_message_type(result)
@@ -323,12 +330,18 @@ class MessageConverter:
 
     @staticmethod
     def _handle_image(data: Any, result: _ParseResult) -> None:
-        """处理图片段（适配器已编码为 base64）。"""
+        """处理图片段（适配器已编码为 base64）。
+        
+        如果启用了 VLM，会尝试识别图片内容并添加到文本中。
+        """
         if isinstance(data, str):
+            normalized_data = normalize_base64(data)
             result.media.append({
                 "type": "image",
-                "data": normalize_base64(data),
+                "data": normalized_data,
             })
+            
+            # 添加图片描述占位符，等待异步识别
             result.text_parts.append("[图片]")
         elif isinstance(data, list):
             # data 是嵌套段 — 不常见，但规范允许
@@ -336,13 +349,19 @@ class MessageConverter:
             result.text_parts.append("[图片]")
 
     @staticmethod
-    def _handle_emoji(data: Any, result: _ParseResult) -> None:
-        """处理表情包段（适配器已编码为 base64）。"""
+    def _handle_emoji( data: Any, result: _ParseResult) -> None:
+        """处理表情包段（适配器已编码为 base64）。
+        
+        如果启用了 VLM，会尝试识别表情包内容并添加到文本中。
+        """
         if isinstance(data, str):
+            normalized_data = normalize_base64(data)
             result.media.append({
                 "type": "emoji",
-                "data": normalize_base64(data),
+                "data": normalized_data,
             })
+            
+            # 添加表情包描述占位符，等待异步识别
             result.text_parts.append("[表情包]")
         elif isinstance(data, list):
             result.media.append({"type": "emoji", "data": str(data)})
@@ -479,6 +498,127 @@ class MessageConverter:
 
         return type_mapping.get(first_media_type, MessageType.UNKNOWN)
 
+    async def _recognize_media_with_vlm(self, result: _ParseResult) -> _ParseResult:
+        """使用 VLM 识别媒体内容（图片、表情包）并更新文本描述。
+        
+        Args:
+            result: 解析结果
+            
+        Returns:
+            更新后的解析结果
+        """
+        try:
+            from src.app.plugin_system.api.llm_api import get_model_set_by_task, create_llm_request
+            from src.kernel.llm import LLMContextManager, LLMPayload, ROLE, Text, Image
+            
+            # 获取 VLM 模型配置
+            vlm_model_set = get_model_set_by_task("vlm")
+            if not vlm_model_set:
+                logger.debug("未配置 VLM 模型，跳过图片识别")
+                return result
+            
+            # 收集需要识别的媒体
+            media_to_recognize = []
+            for i, media in enumerate(result.media):
+                if media["type"] in ("image", "emoji"):
+                    media_to_recognize.append((i, media))
+            
+            if not media_to_recognize:
+                return result
+            
+            # 批量识别（如果有多个图片）
+            # 为了简化，这里一次性识别所有图片
+            descriptions = []
+            for idx, media in media_to_recognize:
+                try:
+                    description = await self._recognize_single_image(
+                        media["data"], 
+                        media["type"],
+                        vlm_model_set
+                    )
+                    descriptions.append((idx, description))
+                except Exception as e:
+                    logger.warning(f"识别{media['type']}失败: {e}")
+                    descriptions.append((idx, None))
+            
+            # 重建 text_parts，替换占位符
+            new_text_parts = []
+            media_idx = 0
+            for part in result.text_parts:
+                if part in ("[图片]", "[表情包]"):
+                    # 找到对应的描述
+                    if media_idx < len(descriptions):
+                        _, description = descriptions[media_idx]
+                        if description:
+                            media_type = "图片" if part == "[图片]" else "表情包"
+                            new_text_parts.append(f"[{media_type}:{description}]")
+                        else:
+                            new_text_parts.append(part)
+                        media_idx += 1
+                    else:
+                        new_text_parts.append(part)
+                else:
+                    new_text_parts.append(part)
+            
+            result.text_parts = new_text_parts
+            
+        except ImportError:
+            logger.debug("LLM API 未加载，跳过图片识别")
+        except Exception as e:
+            logger.error(f"VLM 图片识别失败: {e}", exc_info=True)
+        
+        return result
+    
+    async def _recognize_single_image(self, base64_data: str, media_type: str, vlm_model_set) -> str:
+        """识别单张图片内容。
+        
+        Args:
+            base64_data: base64 编码的图片数据
+            media_type: 媒体类型（image 或 emoji）
+            vlm_model_set: VLM 模型配置
+            
+        Returns:
+            图片的文字描述
+        """
+        from src.app.plugin_system.api.llm_api import create_llm_request
+        from src.kernel.llm import LLMContextManager, LLMPayload, ROLE, Text, Image
+        
+        # 创建 VLM 请求
+        context_manager = LLMContextManager(max_payloads=3)
+        request = create_llm_request(
+            vlm_model_set,
+            "image_recognition",
+            context_manager=context_manager,
+        )
+        
+        # 构建提示词
+        if media_type == "emoji":
+            prompt = "请简要描述这个表情包的内容和含义，用一句话概括。"
+        else:
+            prompt = "请简要描述这张图片的内容，用一句话概括。"
+        
+        # 构建包含图片的 payload
+        # 如果 base64_data 不包含 data URL 前缀，添加它
+        if not base64_data.startswith("data:"):
+            image_value = f"base64|{base64_data}"
+        else:
+            image_value = base64_data
+        
+        request.add_payload(LLMPayload(ROLE.USER, [Text(prompt), Image(image_value)]))
+        
+        # 发送请求
+        response = await request.send(stream=False)
+        await response
+        
+        # 提取描述文本
+        description = response.message.strip() if response.message else ""
+        
+        # 限制长度，避免描述过长
+        if len(description) > 100:
+            description = description[:97] + "..."
+        
+        return description
+    
     @staticmethod
     def _build_content(result: _ParseResult, message_type: MessageType) -> str | Any:
         """构建 Message.content 字段。

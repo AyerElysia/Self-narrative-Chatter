@@ -270,11 +270,13 @@ class StreamManager:
         # 获取流级锁
         lock = self._get_stream_lock(stream_id)
         async with lock:
+            person_id = self._resolve_person_id_from_message(message)
+
             # 构建数据库消息数据
             message_data = {
                 "message_id": message.message_id,
                 "stream_id": stream_id,
-                "person_id": getattr(message, "person_id", None),
+                "person_id": person_id,
                 "time": message.time,
                 "message_type": message.message_type.value,
                 "content": str(message.content),
@@ -323,10 +325,12 @@ class StreamManager:
 
         lock = self._get_stream_lock(stream_id)
         async with lock:
+            person_id = self._resolve_person_id_from_message(message)
+
             message_data = {
                 "message_id": message.message_id,
                 "stream_id": stream_id,
-                "person_id": getattr(message, "person_id", None),
+                "person_id": person_id,
                 "time": message.time,
                 "message_type": message.message_type.value,
                 "content": str(message.content),
@@ -670,37 +674,68 @@ class StreamManager:
 
         stream_info = await get_stream_manager().get_stream_info(db_message.stream_id)
 
-        # 获取 sender_id 和 sender_name
-        if db_message.person_id:
-            parts = db_message.person_id.split(":")
-            if len(parts) >= 2:
-                platform, user_id = parts[0], parts[1]
-            else:
-                platform, user_id = "unknown", db_message.person_id
-        else:
-            platform, user_id = "system", "system"
+        sender_id = "system"
+        sender_name = "未知用户"
+        sender_cardname = ""
 
-        person, _ = await get_user_query_helper().get_or_create_person(
-            platform=platform,
-            user_id=user_id,
-        )
+        if db_message.person_id:
+            try:
+                person = await get_user_query_helper().person_crud.get_by(
+                    person_id=db_message.person_id
+                )
+                if person:
+                    sender_id = str(person.user_id or person.person_id or "")
+                    sender_name = person.nickname or sender_id or "未知用户"
+                    sender_cardname = person.cardname or ""
+                else:
+                    sender_id = db_message.person_id
+                    sender_name = "未知用户"
+            except Exception as e:
+                logger.warning(
+                    f"恢复发送者信息失败: person_id={db_message.person_id}, error={e}"
+                )
+                sender_id = db_message.person_id
+                sender_name = "未知用户"
+
+        normalized_plain_text = db_message.processed_plain_text
+        if normalized_plain_text is None:
+            normalized_plain_text = str(db_message.content)
         
         return Message(
             message_id=db_message.message_id,
             time=db_message.time,
             reply_to=db_message.reply_to,
             content=db_message.content,
-            processed_plain_text=db_message.processed_plain_text,
+            processed_plain_text=normalized_plain_text,
             message_type=MessageType(db_message.message_type),
-            sender_id=person.person_id,
-            sender_name=person.nickname if person.nickname else "未知用户",
-            sender_cardname=person.cardname if person.cardname else "",
+            sender_id=sender_id,
+            sender_name=sender_name,
+            sender_cardname=sender_cardname,
             platform=db_message.platform or "",
             chat_type=stream_info.get("chat_type", "private") if stream_info else "private",
             stream_id=db_message.stream_id,
             raw_data=None,
             extra={},
         )
+
+    def _resolve_person_id_from_message(self, message: "Message") -> str | None:
+        """从运行时消息解析 person_id，用于数据库持久化。"""
+        from src.core.utils.user_query_helper import get_user_query_helper
+
+        direct_person_id = getattr(message, "person_id", None)
+        if isinstance(direct_person_id, str) and direct_person_id:
+            return direct_person_id
+
+        extra_person_id = message.extra.get("person_id")
+        if isinstance(extra_person_id, str) and extra_person_id:
+            return extra_person_id
+
+        sender_id = str(getattr(message, "sender_id", "") or "")
+        platform = str(getattr(message, "platform", "") or "")
+        if not sender_id or not platform:
+            return None
+
+        return get_user_query_helper().generate_person_id(platform, sender_id)
 
 
 # 全局单例

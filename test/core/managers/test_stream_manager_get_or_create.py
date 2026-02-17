@@ -176,3 +176,59 @@ async def test_db_message_to_runtime_fallback_to_content_when_plain_text_missing
     assert runtime_msg.sender_name == "Alice"
     assert runtime_msg.sender_id == "user_001"
     assert runtime_msg.processed_plain_text == "bot reply"
+
+
+@pytest.mark.asyncio
+async def test_db_message_to_runtime_uses_bot_nickname_for_bot_message(monkeypatch) -> None:
+    """数据库重建历史时，Bot 自身消息应优先显示 bot_nickname。"""
+    from src.core.managers.stream_manager import StreamManager
+
+    manager = StreamManager()
+    manager.get_stream_info = AsyncMock(return_value={"chat_type": "private"})  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "src.core.managers.get_stream_manager",
+        lambda: manager,
+    )
+
+    fake_person = SimpleNamespace(
+        person_id="hash_qq_bot_001",
+        user_id="10001",
+        nickname=None,
+        cardname="",
+    )
+    helper = SimpleNamespace(
+        person_crud=SimpleNamespace(get_by=AsyncMock(return_value=fake_person)),
+        generate_person_id=lambda platform, user_id: f"{platform}:{user_id}",
+    )
+    monkeypatch.setattr(
+        "src.core.utils.user_query_helper.get_user_query_helper",
+        lambda: helper,
+    )
+
+    adapter_manager = SimpleNamespace(
+        get_bot_info_by_platform=AsyncMock(
+            return_value={"bot_id": "10001", "bot_nickname": "MoFox"}
+        )
+    )
+    monkeypatch.setattr(
+        "src.core.managers.adapter_manager.get_adapter_manager",
+        lambda: adapter_manager,
+    )
+
+    db_message = SimpleNamespace(
+        message_id="db002",
+        stream_id="stream001",
+        person_id="hash_qq_bot_001",
+        time=1700000001.0,
+        reply_to=None,
+        content="bot self message",
+        processed_plain_text="bot self message",
+        message_type="text",
+        platform="qq",
+    )
+
+    runtime_msg = await manager._db_message_to_runtime(db_message)
+
+    assert runtime_msg.sender_id == "10001"
+    assert runtime_msg.sender_name == "MoFox"
+    assert runtime_msg.sender_cardname == "MoFox"

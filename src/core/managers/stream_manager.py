@@ -697,6 +697,40 @@ class StreamManager:
                 sender_id = db_message.person_id
                 sender_name = "未知用户"
 
+        if db_message.platform:
+            try:
+                from src.core.managers.adapter_manager import get_adapter_manager
+
+                bot_info = await get_adapter_manager().get_bot_info_by_platform(
+                    db_message.platform
+                )
+                if bot_info:
+                    bot_id = str(bot_info.get("bot_id", "") or "")
+                    bot_nickname = str(bot_info.get("bot_nickname", "") or "")
+                    bot_person_id = (
+                        get_user_query_helper().generate_person_id(
+                            db_message.platform,
+                            bot_id,
+                        )
+                        if bot_id
+                        else ""
+                    )
+                    is_bot_message = bool(
+                        bot_id
+                        and (
+                            sender_id == bot_id
+                            or db_message.person_id == bot_person_id
+                        )
+                    )
+                    if is_bot_message:
+                        sender_name = bot_nickname or sender_name or bot_id
+                        if bot_nickname and not sender_cardname:
+                            sender_cardname = bot_nickname
+            except Exception as e:
+                logger.warning(
+                    f"恢复 Bot 发送者信息失败: platform={db_message.platform}, error={e}"
+                )
+
         normalized_plain_text = db_message.processed_plain_text
         if normalized_plain_text is None:
             normalized_plain_text = str(db_message.content)

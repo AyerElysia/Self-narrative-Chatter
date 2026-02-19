@@ -8,10 +8,7 @@ from src.kernel.llm import (
     LLMUsable,
     ModelSet,
     RerankRequest,
-    ToolCall,
-    ToolExecutor,
     ToolRegistry,
-    ToolResult,
 )
 from src.core.config import get_model_config
 
@@ -87,6 +84,44 @@ def get_model_set_by_task(name: str) -> ModelSet:
         ModelSet 实例
     """
     return get_model_config().get_task(name)
+
+
+def get_model_set_by_name(
+    model_name: str,
+    *,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> ModelSet:
+    """根据模型名称获取 ModelSet
+    
+    通过模型内部标识符直接获取可用于 LLMRequest 的 ModelSet，
+    无需预先配置任务。所有参数都是可选的，None 时使用合理的默认值。
+    
+    Args:
+        model_name: 模型名称（config/model.toml 中 models 列表里的 name）
+        temperature: 温度参数，None 时使用默认值 0.7
+        max_tokens: 最大输出 token 数，None 时使用默认值 800
+        
+    Returns:
+        ModelSet: 包含单个模型配置的列表
+        
+    Raises:
+        KeyError: 如果模型或其提供商未找到
+        
+    Examples:
+        ```python
+        from src.app.plugin_system.api import llm_api
+        
+        model_set = llm_api.get_model_set_by_name("gpt-4")
+        request = llm_api.create_llm_request(model_set, request_name="chat")
+        ```
+    """
+    return get_model_config().get_model_set_by_name(
+        model_name,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+
 
 def create_tool_registry(tools: list[type[LLMUsable]] | None = None) -> ToolRegistry:
     """创建工具注册表实例"""

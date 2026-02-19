@@ -165,8 +165,6 @@ class EventManager:
                 (EventDecision, params): 决策和参数字典
             """
             try:
-                logger.debug(f"执行事件处理器: {signature}")
-
                 # 执行处理器
                 result = await handler.execute(params)
                 success = result[0]

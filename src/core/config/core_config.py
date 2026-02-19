@@ -279,6 +279,7 @@ class CoreConfig(ConfigBase):
 
     permissions: PermissionSection = Field(default_factory=PermissionSection)
 
+    @config_section("http_router")
     class HttpRouterSection(SectionBase):
         """HTTP 路由配置节
 
@@ -296,6 +297,10 @@ class CoreConfig(ConfigBase):
         http_router_port: int = Field(
             default=8000,
             description="HTTP 路由监听端口",
+        )
+        api_keys: list[str] = Field(
+            default_factory=list,
+            description="WebUI API 访问密钥列表，留空则禁用认证（不推荐）",
         )
     http_router: HttpRouterSection = Field(default_factory=HttpRouterSection)
 

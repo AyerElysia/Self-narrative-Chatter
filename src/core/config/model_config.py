@@ -515,6 +515,83 @@ class ModelConfig(ConfigBase):
         
         return cast(ModelSet, model_set)
 
+    def get_model_set_by_name(
+        self,
+        model_name: str,
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> ModelSet:
+        """根据模型名称获取 ModelSet
+        
+        通过模型内部标识符直接获取可用于 LLMRequest 的 ModelSet，
+        无需预先配置任务。所有参数都是可选的，None 时使用合理的默认值。
+        
+        Args:
+            model_name: 模型名称（config/model.toml 中 models 列表里的 name）
+            temperature: 温度参数，None 时使用默认值 0.7
+            max_tokens: 最大输出 token 数，None 时使用默认值 800
+            
+        Returns:
+            ModelSet: 包含单个模型配置的列表
+            
+        Raises:
+            KeyError: 如果模型或其提供商未找到
+            
+        Examples:
+            ```python
+            from src.core.config import get_model_config
+            from src.kernel.llm import LLMRequest
+            
+            config = get_model_config()
+            model_set = config.get_model_set_by_name("gpt-4")
+            
+            request = LLMRequest(model_set=model_set, request_name="chat")
+            ```
+        """
+        # 获取模型信息
+        model_info = self.get_model(model_name)
+        
+        # 获取提供商信息
+        provider = self.get_provider(model_info.api_provider)
+        
+        # 获取全局额外参数
+        global_extra_params: dict[str, Any] = {}
+        try:
+            from src.core.config import get_core_config
+            core_config = get_core_config()
+            global_extra_params = {
+                "force_sync_http": core_config.advanced.force_sync_http,
+                "trust_env": core_config.advanced.trust_env,
+            }
+        except Exception:
+            global_extra_params = {}
+        
+        # 合并额外参数
+        extra_params = dict(global_extra_params)
+        extra_params.update(model_info.extra_params)
+        
+        # 构建 ModelEntry（使用配置中的默认值）
+        model_entry: dict[str, Any] = {
+            "api_provider": provider.name,
+            "base_url": provider.base_url,
+            "model_identifier": model_info.model_identifier,
+            "api_key": provider.get_api_key(),
+            "client_type": provider.client_type,
+            "max_retry": provider.max_retry,
+            "timeout": float(provider.timeout),
+            "retry_interval": float(provider.retry_interval),
+            "price_in": model_info.price_in,
+            "price_out": model_info.price_out,
+            "temperature": temperature if temperature is not None else 0.7,
+            "max_tokens": max_tokens if max_tokens is not None else 800,
+            "max_context": model_info.max_context,
+            "tool_call_compat": model_info.tool_call_compat,
+            "extra_params": extra_params,
+        }
+        
+        return cast(ModelSet, [model_entry])
+
 
 # ==============================================================================
 # Global Configuration Management

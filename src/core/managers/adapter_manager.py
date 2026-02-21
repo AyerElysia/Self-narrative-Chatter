@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from src.kernel.event import get_event_bus, EventDecision
@@ -24,6 +25,21 @@ if TYPE_CHECKING:
     from src.core.managers.plugin_manager import PluginManager
 
 logger = get_logger("adapter_manager")
+
+# 全局适配器命令响应等待字典
+_pending_adapter_responses: dict[str, asyncio.Future[dict[str, Any]]] = {}
+
+
+def _set_adapter_response(request_id: str, response: dict[str, Any]) -> None:
+    """设置适配器响应结果。
+    
+    Args:
+        request_id: 请求ID
+        response: 响应数据
+    """
+    future = _pending_adapter_responses.get(request_id)
+    if future and not future.done():
+        future.set_result(response)
 
 
 class AdapterManager:
@@ -305,16 +321,17 @@ class AdapterManager:
         return None
 
     async def send_adapter_command(
-        self, adapter_sign: str, command_name: str, command_data: dict[str, Any]
+        self, adapter_sign: str, command_name: str, command_data: dict[str, Any], timeout: float = 20.0
     ) -> dict[str, Any]:
-        """向指定适配器发送命令。
+        """向指定适配器发送命令并等待响应。
 
-        通过适配器签名定位适配器，然后调用其 send_adapter_command 方法。
+        通过构建adapter_command消息信封发送到适配器，适配器执行后会返回adapter_response消息信封。
 
         Args:
             adapter_sign: 适配器组件签名，格式为 'plugin_name:adapter:adapter_name'
             command_name: 命令名称
             command_data: 命令参数字典
+            timeout: 超时时间（秒），默认20秒
 
         Returns:
             dict: 命令执行结果，格式为:
@@ -341,20 +358,63 @@ class AdapterManager:
 
         adapter = self._active_adapters[adapter_sign]
 
+        # 生成唯一请求ID
+        request_id = str(uuid.uuid4())
+        
+        # 创建Future用于等待响应
+        response_future: asyncio.Future[dict[str, Any]] = asyncio.Future()
+        _pending_adapter_responses[request_id] = response_future
+
         try:
-            # 调用适配器的 send_adapter_command 方法
-            result = await adapter.send_adapter_command(command_name, command_data)
-            return result
+            # 构建adapter_command消息信封
+            from mofox_wire import MessageEnvelope
+            
+            envelope: MessageEnvelope = {
+                "direction": "outgoing",  # type: ignore[typeddict-item]
+                "message_info": {
+                    "message_id": request_id,
+                    "platform": adapter.platform,
+                    "time": 0,
+                },
+                "message_segment": {  # type: ignore[typeddict-item]
+                    "type": "adapter_command",
+                    "data": {
+                        "request_id": request_id,
+                        "action": command_name,
+                        "params": command_data,
+                        "timeout": timeout,
+                    }
+                },
+            }
+            
+            # 发送到适配器
+            await adapter._send_platform_message(envelope)
+            
+            # 等待响应（带超时）
+            try:
+                result = await asyncio.wait_for(response_future, timeout=timeout)
+                return result
+            except asyncio.TimeoutError:
+                logger.error(f"适配器命令 '{command_name}' 超时（{timeout}秒）")
+                return {
+                    "status": "error",
+                    "message": f"命令执行超时（{timeout}秒）",
+                    "data": None,
+                }
+
         except Exception as e:
-            # 记录完整 traceback 以便排查问题
-            logger.exception(
-                f"向适配器 '{adapter_sign}' 发送命令 '{command_name}' 时发生异常"
+            logger.error(
+                f"向适配器 '{adapter_sign}' 发送命令 '{command_name}' 时发生异常: {e}",
+                exc_info=True,
             )
             return {
                 "status": "error",
                 "message": f"发送命令时发生异常: {str(e)}",
                 "data": None,
             }
+        finally:
+            # 清理Future
+            _pending_adapter_responses.pop(request_id, None)
 
 
 # 全局适配器管理器实例

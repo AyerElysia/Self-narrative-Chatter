@@ -362,84 +362,12 @@ class TestAdapterReconnect:
 
 
 # ---------------------------------------------------------------------------
-# 适配器命令 (send_adapter_command / get_bot_info) 相关测试
+# 适配器命令 (get_bot_info) 相关测试
 # ---------------------------------------------------------------------------
 
 
-class CustomAdapterWithCommand(TestAdapter):
-    """带有自定义命令处理的测试适配器。"""
-
-    async def send_adapter_command(
-        self, command_name: str, command_data: dict
-    ) -> dict:
-        """自定义命令处理。"""
-        if command_name == "echo":
-            return {"status": "ok", "data": command_data, "message": "echo success"}
-        if command_name == "fail":
-            return {"status": "failed", "message": "command failed", "data": None}
-        # 其他命令交由基类处理
-        return await super().send_adapter_command(command_name, command_data)
-
-
 class TestAdapterCommand:
-    """测试适配器命令功能（send_adapter_command / get_bot_info）。"""
-
-    @pytest.mark.asyncio
-    async def test_send_adapter_command_default_returns_error(self):
-        """测试基类默认实现对未知命令返回 error 状态。"""
-        mock_sink = MagicMock()
-        adapter = TestAdapter(core_sink=mock_sink)
-
-        result = await adapter.send_adapter_command("unknown_cmd", {})
-
-        assert result["status"] == "error"
-        assert "unknown_cmd" in result["message"]
-
-    @pytest.mark.asyncio
-    async def test_send_adapter_command_returns_dict(self):
-        """测试 send_adapter_command 始终返回字典。"""
-        mock_sink = MagicMock()
-        adapter = TestAdapter(core_sink=mock_sink)
-
-        result = await adapter.send_adapter_command("any_cmd", {"key": "value"})
-
-        assert isinstance(result, dict)
-        assert "status" in result
-        assert "message" in result
-
-    @pytest.mark.asyncio
-    async def test_send_adapter_command_custom_echo(self):
-        """测试自定义命令处理器——echo 命令。"""
-        mock_sink = MagicMock()
-        adapter = CustomAdapterWithCommand(core_sink=mock_sink)
-
-        payload = {"text": "hello"}
-        result = await adapter.send_adapter_command("echo", payload)
-
-        assert result["status"] == "ok"
-        assert result["data"] == payload
-
-    @pytest.mark.asyncio
-    async def test_send_adapter_command_custom_fail(self):
-        """测试自定义命令处理器——fail 命令返回 failed 状态。"""
-        mock_sink = MagicMock()
-        adapter = CustomAdapterWithCommand(core_sink=mock_sink)
-
-        result = await adapter.send_adapter_command("fail", {})
-
-        assert result["status"] == "failed"
-        assert result["data"] is None
-
-    @pytest.mark.asyncio
-    async def test_send_adapter_command_custom_falls_back_to_base(self):
-        """测试自定义命令处理器中未知命令回退到基类。"""
-        mock_sink = MagicMock()
-        adapter = CustomAdapterWithCommand(core_sink=mock_sink)
-
-        result = await adapter.send_adapter_command("not_handled", {})
-
-        assert result["status"] == "error"
-        assert "not_handled" in result["message"]
+    """测试适配器命令功能（get_bot_info）。"""
 
     @pytest.mark.asyncio
     async def test_get_bot_info_returns_dict(self):
@@ -464,25 +392,364 @@ class TestAdapterCommand:
 
         assert result["platform"] == TestAdapter.platform
 
+
+# ---------------------------------------------------------------------------
+# 适配器命令请求-响应机制测试
+# ---------------------------------------------------------------------------
+
+
+class AdapterWithCommandResponse(TestAdapter):
+    """支持命令请求-响应的测试适配器。"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.received_commands = []  # 记录收到的命令
+        self.command_responses = {}  # 预设的命令响应
+
+    async def from_platform_message(self, raw: Any):
+        """解析平台消息，包括adapter_command和adapter_response。"""
+        from mofox_wire import MessageEnvelope
+
+        # 记录收到的命令（用于测试验证）
+        if isinstance(raw, dict) and raw.get("type") == "adapter_command":
+            self.received_commands.append(raw)
+            
+            # 模拟处理命令并返回响应
+            request_id = raw.get("request_id")
+            action = raw.get("action")
+            
+            # 获取预设的响应，或使用默认响应
+            response = self.command_responses.get(
+                action,
+                {"status": "ok", "data": {"action": action}, "message": "success"}
+            )
+            
+            # 构建adapter_response消息信封
+            response_envelope: MessageEnvelope = {
+                "direction": "incoming",  # type: ignore[typeddict-item]
+                "message_info": {
+                    "message_id": str(request_id),
+                    "platform": self.platform,
+                    "time": 0,
+                },
+                "message_segment": {  # type: ignore[typeddict-item]
+                    "type": "adapter_response",
+                    "data": {
+                        "request_id": request_id,
+                        "response": response,
+                    }
+                },
+            }
+            
+            # 通过core_sink发回核心
+            if self.core_sink:
+                await self.core_sink.send(response_envelope)
+            
+        return await super().from_platform_message(raw)
+
+    async def _send_platform_message(self, envelope) -> None:
+        """发送消息到平台，处理adapter_command类型。"""
+        message_segment = envelope.get("message_segment")
+        
+        if isinstance(message_segment, dict):
+            seg_type = message_segment.get("type")
+            
+            # 如果是adapter_command，模拟处理
+            if seg_type == "adapter_command":
+                seg_data = message_segment.get("data", {})
+                
+                # 构建原始消息格式并通过from_platform_message处理
+                raw_command = {
+                    "type": "adapter_command",
+                    "request_id": seg_data.get("request_id"),
+                    "action": seg_data.get("action"),
+                    "params": seg_data.get("params", {}),
+                }
+                
+                # 触发消息处理
+                await self.from_platform_message(raw_command)
+                return
+        
+        # 其他消息类型的默认处理
+        await super()._send_platform_message(envelope)
+
+
+class TestAdapterCommandResponseMechanism:
+    """测试适配器命令请求-响应机制。"""
+
     @pytest.mark.asyncio
-    async def test_send_adapter_command_with_empty_data(self):
-        """测试发送空参数的命令。"""
+    async def test_adapter_command_request_response_flow(self):
+        """测试完整的命令请求-响应流程。"""
+        from mofox_wire import MessageEnvelope
+        
+        # 创建mock core_sink
         mock_sink = MagicMock()
-        adapter = TestAdapter(core_sink=mock_sink)
-
-        result = await adapter.send_adapter_command("some_command", {})
-
-        assert isinstance(result, dict)
-        assert result["status"] == "error"
+        received_envelopes = []
+        
+        async def mock_send(envelope: MessageEnvelope):
+            received_envelopes.append(envelope)
+        
+        mock_sink.send = AsyncMock(side_effect=mock_send)
+        
+        # 创建适配器
+        adapter = AdapterWithCommandResponse(core_sink=mock_sink)
+        
+        # 构建adapter_command消息信封
+        request_id = "test-request-123"
+        command_envelope: MessageEnvelope = {
+            "direction": "outgoing",  # type: ignore[typeddict-item]
+            "message_info": {
+                "message_id": request_id,
+                "platform": adapter.platform,
+                "time": 0,
+            },
+            "message_segment": {  # type: ignore[typeddict-item]
+                "type": "adapter_command",
+                "data": {
+                    "request_id": request_id,
+                    "action": "get_group_list",
+                    "params": {},
+                    "timeout": 20.0,
+                }
+            },
+        }
+        
+        # 发送命令到适配器
+        await adapter._send_platform_message(command_envelope)
+        
+        # 验证适配器收到命令
+        assert len(adapter.received_commands) == 1
+        assert adapter.received_commands[0]["action"] == "get_group_list"
+        assert adapter.received_commands[0]["request_id"] == request_id
+        
+        # 验证适配器发送了响应
+        assert len(received_envelopes) == 1
+        response_envelope = received_envelopes[0]
+        
+        assert response_envelope["direction"] == "incoming"
+        assert isinstance(response_envelope["message_segment"], dict)
+        assert response_envelope["message_segment"]["type"] == "adapter_response"
+        
+        # 验证响应数据
+        response_data = response_envelope["message_segment"]["data"]
+        assert response_data["request_id"] == request_id
+        assert response_data["response"]["status"] == "ok"
 
     @pytest.mark.asyncio
-    async def test_send_adapter_command_with_complex_data(self):
-        """测试发送复杂参数的命令。"""
+    async def test_adapter_command_with_custom_response(self):
+        """测试带有自定义响应的命令处理。"""
         mock_sink = MagicMock()
-        adapter = CustomAdapterWithCommand(core_sink=mock_sink)
+        received_envelopes = []
+        
+        async def mock_send(envelope):
+            received_envelopes.append(envelope)
+        
+        mock_sink.send = AsyncMock(side_effect=mock_send)
+        
+        adapter = AdapterWithCommandResponse(core_sink=mock_sink)
+        
+        # 预设命令响应
+        custom_response = {
+            "status": "ok",
+            "data": {"groups": [{"id": "123", "name": "Test Group"}]},
+            "message": "群列表获取成功"
+        }
+        adapter.command_responses["get_group_list"] = custom_response
+        
+        # 发送命令
+        request_id = "test-request-456"
+        command_envelope = {
+            "direction": "outgoing",  # type: ignore[typeddict-item]
+            "message_info": {
+                "message_id": request_id,
+                "platform": adapter.platform,
+                "time": 0,
+            },
+            "message_segment": {  # type: ignore[typeddict-item]
+                "type": "adapter_command",
+                "data": {
+                    "request_id": request_id,
+                    "action": "get_group_list",
+                    "params": {},
+                }
+            },
+        }
+        
+        await adapter._send_platform_message(command_envelope)
+        
+        # 验证收到自定义响应
+        assert len(received_envelopes) == 1
+        response_envelope = received_envelopes[0]
+        response_data = response_envelope["message_segment"]["data"]
+        
+        assert response_data["response"] == custom_response
+        assert response_data["response"]["data"]["groups"][0]["name"] == "Test Group"
 
-        payload = {"nested": {"a": 1, "b": [1, 2, 3]}, "flag": True}
-        result = await adapter.send_adapter_command("echo", payload)
+    @pytest.mark.asyncio
+    async def test_adapter_command_with_params(self):
+        """测试带参数的命令处理。"""
+        mock_sink = MagicMock()
+        received_envelopes = []
+        
+        async def mock_send(envelope):
+            received_envelopes.append(envelope)
+        
+        mock_sink.send = AsyncMock(side_effect=mock_send)
+        
+        adapter = AdapterWithCommandResponse(core_sink=mock_sink)
+        
+        # 发送带参数的命令
+        request_id = "test-request-789"
+        params = {"group_id": "123456", "user_id": "789"}
+        
+        command_envelope = {
+            "direction": "outgoing",  # type: ignore[typeddict-item]
+            "message_info": {
+                "message_id": request_id,
+                "platform": adapter.platform,
+                "time": 0,
+            },
+            "message_segment": {  # type: ignore[typeddict-item]
+                "type": "adapter_command",
+                "data": {
+                    "request_id": request_id,
+                    "action": "kick_member",
+                    "params": params,
+                }
+            },
+        }
+        
+        await adapter._send_platform_message(command_envelope)
+        
+        # 验证命令携带的参数被正确接收
+        assert len(adapter.received_commands) == 1
+        assert adapter.received_commands[0]["params"] == params
 
-        assert result["status"] == "ok"
-        assert result["data"] == payload
+    @pytest.mark.asyncio
+    async def test_adapter_command_error_response(self):
+        """测试命令错误响应。"""
+        mock_sink = MagicMock()
+        received_envelopes = []
+        
+        async def mock_send(envelope):
+            received_envelopes.append(envelope)
+        
+        mock_sink.send = AsyncMock(side_effect=mock_send)
+        
+        adapter = AdapterWithCommandResponse(core_sink=mock_sink)
+        
+        # 预设错误响应
+        error_response = {
+            "status": "failed",
+            "data": None,
+            "message": "权限不足"
+        }
+        adapter.command_responses["ban_member"] = error_response
+        
+        # 发送命令
+        request_id = "test-request-error"
+        command_envelope = {
+            "direction": "outgoing",  # type: ignore[typeddict-item]
+            "message_info": {
+                "message_id": request_id,
+                "platform": adapter.platform,
+                "time": 0,
+            },
+            "message_segment": {  # type: ignore[typeddict-item]
+                "type": "adapter_command",
+                "data": {
+                    "request_id": request_id,
+                    "action": "ban_member",
+                    "params": {"user_id": "123"},
+                }
+            },
+        }
+        
+        await adapter._send_platform_message(command_envelope)
+        
+        # 验证错误响应
+        assert len(received_envelopes) == 1
+        response_envelope = received_envelopes[0]
+        response_data = response_envelope["message_segment"]["data"]
+        
+        assert response_data["response"]["status"] == "failed"
+        assert response_data["response"]["message"] == "权限不足"
+
+    @pytest.mark.asyncio
+    async def test_multiple_commands_sequential(self):
+        """测试顺序发送多个命令。"""
+        mock_sink = MagicMock()
+        received_envelopes = []
+        
+        async def mock_send(envelope):
+            received_envelopes.append(envelope)
+        
+        mock_sink.send = AsyncMock(side_effect=mock_send)
+        
+        adapter = AdapterWithCommandResponse(core_sink=mock_sink)
+        
+        # 发送多个命令
+        commands = [
+            ("req-1", "get_group_list"),
+            ("req-2", "get_friend_list"),
+            ("req-3", "get_bot_info"),
+        ]
+        
+        for request_id, action in commands:
+            command_envelope = {
+                "direction": "outgoing",  # type: ignore[typeddict-item]
+                "message_info": {
+                    "message_id": request_id,
+                    "platform": adapter.platform,
+                    "time": 0,
+                },
+                "message_segment": {  # type: ignore[typeddict-item]
+                    "type": "adapter_command",
+                    "data": {
+                        "request_id": request_id,
+                        "action": action,
+                        "params": {},
+                    }
+                },
+            }
+            await adapter._send_platform_message(command_envelope)
+        
+        # 验证所有命令都被处理
+        assert len(adapter.received_commands) == 3
+        assert len(received_envelopes) == 3
+        
+        # 验证响应顺序
+        for i, (request_id, action) in enumerate(commands):
+            response_data = received_envelopes[i]["message_segment"]["data"]
+            assert response_data["request_id"] == request_id
+            assert response_data["response"]["data"]["action"] == action
+
+    @pytest.mark.asyncio
+    async def test_adapter_command_without_core_sink(self):
+        """测试没有core_sink时的命令处理。"""
+        # 创建没有core_sink的适配器
+        adapter = AdapterWithCommandResponse(core_sink=None)
+        
+        request_id = "test-request-no-sink"
+        command_envelope = {
+            "direction": "outgoing",  # type: ignore[typeddict-item]
+            "message_info": {
+                "message_id": request_id,
+                "platform": adapter.platform,
+                "time": 0,
+            },
+            "message_segment": {  # type: ignore[typeddict-item]
+                "type": "adapter_command",
+                "data": {
+                    "request_id": request_id,
+                    "action": "test_action",
+                    "params": {},
+                }
+            },
+        }
+        
+        # 不应该抛出异常
+        await adapter._send_platform_message(command_envelope)
+        
+        # 命令应该被记录
+        assert len(adapter.received_commands) == 1

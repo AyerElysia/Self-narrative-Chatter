@@ -118,6 +118,12 @@ class MessageReceiver:
             f"adapter={adapter_signature}"
         )
 
+        # 检查是否为adapter_response类型
+        message_segment = envelope.get("message_segment")
+        if isinstance(message_segment, dict) and message_segment.get("type") == "adapter_response":
+            await self._handle_adapter_response(envelope)
+            return
+
         # 判断是否为标准消息（含 message_segment 或 message_chain）
         has_segments = (
             envelope.get("message_segment") is not None  # type: ignore[arg-type]
@@ -178,6 +184,31 @@ class MessageReceiver:
                 "adapter_signature": adapter_signature,
             },
         )
+
+    async def _handle_adapter_response(self, envelope: MessageEnvelope) -> None:
+        """处理适配器响应消息。
+        
+        Args:
+            envelope: 响应消息信封
+        """
+        from src.core.managers.adapter_manager import _set_adapter_response
+        
+        message_segment = envelope.get("message_segment")
+        if not isinstance(message_segment, dict):
+            return
+        
+        seg_data = message_segment.get("data")
+        if not isinstance(seg_data, dict):
+            return
+            
+        request_id = seg_data.get("request_id")
+        response = seg_data.get("response", {})
+        
+        if request_id:
+            logger.debug(f"收到适配器响应: request_id={request_id}")
+            _set_adapter_response(str(request_id), response)
+        else:
+            logger.warning("收到没有request_id的adapter_response")
 
     async def _handle_other(
         self,

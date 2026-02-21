@@ -22,14 +22,14 @@ class TestAdapter(BaseAdapter):
 
     async def from_platform_message(self, raw: Any):
         """解析平台消息。"""
-        from mofox_wire import MessageEnvelope, MessageDirection
+        from mofox_wire import MessageEnvelope
 
         return MessageEnvelope(
-            direction=MessageDirection.UPWARD,
+            direction="incoming",
             message_info={
                 "platform": self.platform,
-                "user_id": raw.get("user_id", "test_user"),
                 "message_id": raw.get("message_id", "test_msg_id"),
+                "time": 0.0,
             },
             message_segment=[{"type": "text", "data": raw.get("content", "test content")}],
             raw_message=raw,
@@ -52,6 +52,14 @@ class TestAdapter(BaseAdapter):
     def is_connected(self) -> bool:
         """Mock 连接状态。"""
         return True
+
+    async def get_bot_info(self) -> dict:
+        """Mock Bot 信息。"""
+        return {
+            "bot_id": "test_bot",
+            "bot_name": "Test Bot",
+            "platform": self.platform,
+        }
 
 
 class TestBaseAdapter:
@@ -244,8 +252,8 @@ class TestBaseAdapter:
         mock_sink = MagicMock()
         adapter = TestAdapter(core_sink=mock_sink)
 
-        # 设置传输配置
-        adapter._transport_config = {"test": "config"}
+        # 设置传输配置（使用 type: ignore 绕过严格类型检查）
+        adapter._transport_config = {"test": "config"}  # type: ignore[assignment]
 
         # 由于 TestAdapter 实现了 _send_platform_message，这里不会抛出异常
         mock_envelope = MagicMock()
@@ -351,3 +359,130 @@ class TestAdapterReconnect:
         assert CustomAdapterWithReconnect.reconnect_called is True
         adapter.stop.assert_called_once()
         adapter.start.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# 适配器命令 (send_adapter_command / get_bot_info) 相关测试
+# ---------------------------------------------------------------------------
+
+
+class CustomAdapterWithCommand(TestAdapter):
+    """带有自定义命令处理的测试适配器。"""
+
+    async def send_adapter_command(
+        self, command_name: str, command_data: dict
+    ) -> dict:
+        """自定义命令处理。"""
+        if command_name == "echo":
+            return {"status": "ok", "data": command_data, "message": "echo success"}
+        if command_name == "fail":
+            return {"status": "failed", "message": "command failed", "data": None}
+        # 其他命令交由基类处理
+        return await super().send_adapter_command(command_name, command_data)
+
+
+class TestAdapterCommand:
+    """测试适配器命令功能（send_adapter_command / get_bot_info）。"""
+
+    @pytest.mark.asyncio
+    async def test_send_adapter_command_default_returns_error(self):
+        """测试基类默认实现对未知命令返回 error 状态。"""
+        mock_sink = MagicMock()
+        adapter = TestAdapter(core_sink=mock_sink)
+
+        result = await adapter.send_adapter_command("unknown_cmd", {})
+
+        assert result["status"] == "error"
+        assert "unknown_cmd" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_send_adapter_command_returns_dict(self):
+        """测试 send_adapter_command 始终返回字典。"""
+        mock_sink = MagicMock()
+        adapter = TestAdapter(core_sink=mock_sink)
+
+        result = await adapter.send_adapter_command("any_cmd", {"key": "value"})
+
+        assert isinstance(result, dict)
+        assert "status" in result
+        assert "message" in result
+
+    @pytest.mark.asyncio
+    async def test_send_adapter_command_custom_echo(self):
+        """测试自定义命令处理器——echo 命令。"""
+        mock_sink = MagicMock()
+        adapter = CustomAdapterWithCommand(core_sink=mock_sink)
+
+        payload = {"text": "hello"}
+        result = await adapter.send_adapter_command("echo", payload)
+
+        assert result["status"] == "ok"
+        assert result["data"] == payload
+
+    @pytest.mark.asyncio
+    async def test_send_adapter_command_custom_fail(self):
+        """测试自定义命令处理器——fail 命令返回 failed 状态。"""
+        mock_sink = MagicMock()
+        adapter = CustomAdapterWithCommand(core_sink=mock_sink)
+
+        result = await adapter.send_adapter_command("fail", {})
+
+        assert result["status"] == "failed"
+        assert result["data"] is None
+
+    @pytest.mark.asyncio
+    async def test_send_adapter_command_custom_falls_back_to_base(self):
+        """测试自定义命令处理器中未知命令回退到基类。"""
+        mock_sink = MagicMock()
+        adapter = CustomAdapterWithCommand(core_sink=mock_sink)
+
+        result = await adapter.send_adapter_command("not_handled", {})
+
+        assert result["status"] == "error"
+        assert "not_handled" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_get_bot_info_returns_dict(self):
+        """测试 get_bot_info 返回包含必要字段的字典。"""
+        mock_sink = MagicMock()
+        adapter = TestAdapter(core_sink=mock_sink)
+
+        result = await adapter.get_bot_info()
+
+        assert isinstance(result, dict)
+        assert "bot_id" in result
+        assert "bot_name" in result
+        assert "platform" in result
+
+    @pytest.mark.asyncio
+    async def test_get_bot_info_platform_matches(self):
+        """测试 get_bot_info 返回的平台与适配器平台一致。"""
+        mock_sink = MagicMock()
+        adapter = TestAdapter(core_sink=mock_sink)
+
+        result = await adapter.get_bot_info()
+
+        assert result["platform"] == TestAdapter.platform
+
+    @pytest.mark.asyncio
+    async def test_send_adapter_command_with_empty_data(self):
+        """测试发送空参数的命令。"""
+        mock_sink = MagicMock()
+        adapter = TestAdapter(core_sink=mock_sink)
+
+        result = await adapter.send_adapter_command("some_command", {})
+
+        assert isinstance(result, dict)
+        assert result["status"] == "error"
+
+    @pytest.mark.asyncio
+    async def test_send_adapter_command_with_complex_data(self):
+        """测试发送复杂参数的命令。"""
+        mock_sink = MagicMock()
+        adapter = CustomAdapterWithCommand(core_sink=mock_sink)
+
+        payload = {"nested": {"a": 1, "b": [1, 2, 3]}, "flag": True}
+        result = await adapter.send_adapter_command("echo", payload)
+
+        assert result["status"] == "ok"
+        assert result["data"] == payload

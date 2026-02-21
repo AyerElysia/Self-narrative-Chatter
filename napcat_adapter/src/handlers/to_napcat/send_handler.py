@@ -189,18 +189,33 @@ class SendHandler:
 
             logger.debug(f"执行适配器命令: {action}")
 
+            # 执行命令
             if action == "get_cookies":
                 response = await self.send_message_to_napcat(action, params, timeout=40.0)
             else:
                 response = await self.send_message_to_napcat(action, params, timeout=timeout)
 
-            try:
-                from src.plugin_system.apis.send_api import put_adapter_response
-
-                if request_id:
-                    put_adapter_response(str(request_id), response)
-            except Exception as e:
-                logger.debug(f"回填 adapter 响应失败: {e}")
+            # 构建adapter_response消息信封发回核心
+            if request_id and self.adapter.core_sink:
+                response_envelope: MessageEnvelope = {
+                    "direction": "incoming",  # type: ignore[typeddict-item]
+                    "message_info": {
+                        "message_id": str(request_id),
+                        "platform": self.adapter.platform,
+                        "time": 0,
+                    },
+                    "message_segment": {  # type: ignore[typeddict-item]
+                        "type": "adapter_response",
+                        "data": {
+                            "request_id": request_id,
+                            "response": response,
+                        }
+                    },
+                }
+                
+                # 通过CoreSink发回核心
+                await self.adapter.core_sink.send(response_envelope)
+                logger.debug(f"已发送响应信封到核心: request_id={request_id}")
 
             if response.get("status") == "ok":
                 logger.info(f"适配器命令 {action} 执行成功")

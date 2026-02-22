@@ -195,9 +195,18 @@ class MessageConverter:
             MessageType.FILE,
         }
         if message.message_type in _MEDIA_TYPES:
-            content_data = (
-                message.content if isinstance(message.content, str) else ""
-            )
+            content = message.content
+            if isinstance(content, str):
+                content_data: str | dict[str, Any] = content
+            elif isinstance(content, dict):
+                # send_file 等 API 传入 dict（如 {"path": "...", "name": "..."}）
+                # FILE 类型取 path 字段作为数据
+                if message.message_type == MessageType.FILE:
+                    content_data = content.get("path", "")
+                else:
+                    content_data = content
+            else:
+                content_data = ""
             if content_data:
                 seg_list.append({
                     "type": message.message_type.value,

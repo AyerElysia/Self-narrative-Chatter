@@ -2,6 +2,7 @@
 
 from .base import (
     BaseAction,
+    BaseAgent,
     BaseAdapter,
     BaseChatter,
     BaseCommand,
@@ -29,6 +30,7 @@ from .types import (
 
 __all__ = [
     "BaseAction",
+    "BaseAgent",
     "BaseAdapter",
     "BaseChatter",
     "BaseCommand",

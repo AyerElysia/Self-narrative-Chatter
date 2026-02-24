@@ -261,7 +261,6 @@ class MessageSender:
             # 检查事件决策，如果被拦截则返回 False
             decision = result.get("decision")
             if decision == EventDecision.STOP:
-                logger.info(f"消息发送被事件处理器拦截: {message.message_id}")
                 return False
                 
             return True

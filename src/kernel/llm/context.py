@@ -118,14 +118,16 @@ class LLMContextManager:
         return pinned + hook_payloads + remaining_payloads
 
     def _split_pinned_prefix(self, payloads: list[LLMPayload]) -> tuple[list[LLMPayload], list[LLMPayload]]:
+        """将 payloads 拆分为 pinned 消息和对话消息两部分。
+
+        pinned 消息定义为：所有 SYSTEM 和 TOOL 角色的消息，无论其出现在列表的任何位置，
+        均视为固定部分，始终被保留，不参与裁剪。
+        对话消息为剩余的 USER 和 ASSISTANT 消息，按原始顺序保留。
+        """
         pinned_roles = {ROLE.SYSTEM, ROLE.TOOL}
-        idx = 0
-        for payload in payloads:
-            if payload.role in pinned_roles:
-                idx += 1
-                continue
-            break
-        return payloads[:idx], payloads[idx:]
+        pinned = [p for p in payloads if p.role in pinned_roles]
+        tail = [p for p in payloads if p.role not in pinned_roles]
+        return pinned, tail
 
     def _build_qa_groups(self, payloads: list[LLMPayload]) -> list[list[LLMPayload]]:
         """将消息分组。一个组作为一个不可分割的最小裁剪单位。

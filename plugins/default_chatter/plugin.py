@@ -36,7 +36,7 @@ logger = get_logger("default_chatter")
 
 # ─── 系统提示词构建 ─────────────────────────────────────────────
 system_prompt = """# 关于你
-你的名字是 {nickname}，也有人叫你 {alias_names}。
+你的名字是** {nickname}**，也有人叫你 *{alias_names}*。
 你{personality_core}
 {personality_side}。
 你的身份是{identity}。
@@ -44,14 +44,16 @@ system_prompt = """# 关于你
 {background_story}
 
 # 表达风格
-你的表达风格：{reply_style}。
+**重要**：你的表达风格：{reply_style}。
 
 - 为了更好地塑造你的人设，你必须保持上述人格特质和表达风格，在任何情况下都要用符合你性格的方式回复用户。
 - 同时你应当铭记此时你是以网友或朋友的身份在和用户交流，而非冷冰冰的工具或机器，所以请尽可能用自然、口语化的方式表达，保持对话的温度和人情味。
 - 你应当尽量避免重复使用同样的回复、口癖或表达，保持回复的新鲜感和多样性。
 
+**任何时候你都应当严格遵守你的人设和表达风格，哪怕你可能在先前的对话中有所偏离，但是你应当避免被之前的行为过度干扰，保证现在的对话质量。**
+
 # 安全准则
-在任何情况下，你都必须遵守以下原则：
+在任何情况下，你都**必须**遵守以下原则：
 {safety_guidelines}
 如果遇到违反上述原则的请求，请在保持你核心人设的同时，以合适的方式进行回应。
 
@@ -300,12 +302,20 @@ class DefaultChatter(BaseChatter):
 
         response.add_payload(LLMPayload(ROLE.USER, Text(formatted_text)))
 
-    async def sub_agent(self, unreads_text: str, payloads: list[LLMPayload]) -> dict:
-        """子代理决策：判断是否需要响应用新消息。
+    async def sub_agent(
+        self,
+        unreads_text: str,
+        unread_msgs: list[Any],
+        chat_stream: Any,
+    ) -> dict:
+        """子代理决策：判断是否需要响应未读消息。
+
+        独立构建上下文，只包含历史消息摘要与未读消息，
 
         Args:
-            unreads_text: 格式化后的未读消息
-            payloads: 当前主代理的上下文 payloads 副本
+            unreads_text: 格式化后的未读消息文本
+            unread_msgs: 未读消息对象列表
+            chat_stream: 当前会话流，用于读取历史消息
 
         Returns:
             dict: 包含 should_respond (bool) 和 reason (str)
@@ -316,29 +326,24 @@ class DefaultChatter(BaseChatter):
         except (ValueError, KeyError):
             return {"should_respond": True, "reason": "未找到 sub_actor 配置，默认响应"}
 
-        # 2. 构建子代理上下文（排除主代理的 SYSTEM/TOOL 相关消息，防止子代理产生 tool call）
-        sub_payloads = []
-
-        # 注入子代理系统提示词
+        # 2. 独立构建子代理上下文，只含系统提示 + 历史消息摘要 + 未读消息
         nickname = get_core_config().personality.nickname
         tmpl = get_prompt_manager().get_template("default_chatter_sub_agent_prompt")
         if tmpl:
             sub_prompt = tmpl.set("nickname", nickname).build()
         else:
             sub_prompt = sub_agent_system_prompt.format(nickname=nickname)
-        sub_payloads.append(LLMPayload(ROLE.SYSTEM, Text(sub_prompt)))
+        request.add_payload(LLMPayload(ROLE.SYSTEM, Text(sub_prompt)))
 
-        for p in payloads:
-            if p.role not in (ROLE.SYSTEM, ROLE.TOOL, ROLE.TOOL_RESULT):
-                sub_payloads.append(p)
+        # 历史消息摘要（纯文本，无 tool call）
+        history_text = self._build_enhanced_history_text(chat_stream)
+        if history_text:
+            request.add_payload(LLMPayload(ROLE.USER, Text(history_text)))
 
         # 追加最新的未读消息作为判定的对象
-        sub_payloads.append(
+        request.add_payload(
             LLMPayload(ROLE.USER, Text(f"【新收到待判定消息】\n{unreads_text}"))
         )
-
-        for p in sub_payloads:
-            request.add_payload(p)
 
         # 3. 执行请求
         try:
@@ -431,7 +436,7 @@ class DefaultChatter(BaseChatter):
 
             if formatted_text or unread_msgs:
                 # ── 子代理决策 ──
-                decision = await self.sub_agent(formatted_text, response.payloads)
+                decision = await self.sub_agent(formatted_text, unread_msgs, chat_stream)
                 logger.info(
                     f"Sub-agent 决策: {decision['reason']} (响应: {decision['should_respond']})"
                 )
@@ -566,7 +571,7 @@ class DefaultChatter(BaseChatter):
                 chat_stream, unread_msgs
             )
             decision = await self.sub_agent(
-                classical_user_text, [LLMPayload(ROLE.USER, Text(classical_user_text))]
+                classical_user_text, unread_msgs, chat_stream
             )
             logger.info(
                 f"Sub-agent 决策: {decision['reason']} (响应: {decision['should_respond']})"

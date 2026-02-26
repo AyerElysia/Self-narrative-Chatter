@@ -465,6 +465,8 @@ class DefaultChatter(BaseChatter):
         response = request
         # 标记历史消息是否已并入第一个 USER payload
         history_merged = False
+        # 标记本轮是否存在待 LLM 处理的工具结果（tool call 已执行但 LLM 尚未消费）
+        has_pending_tool_results = False
 
         while True:
             _, unread_msgs = await self.fetch_unreads()
@@ -506,9 +508,14 @@ class DefaultChatter(BaseChatter):
                     logger.info("Sub-agent 决定不响应，继续等待...")
                     yield Wait()
                     continue
-            else:
+            elif not has_pending_tool_results:
+                # 无未读消息且无待处理工具结果，等待新消息
                 yield Wait()
                 continue
+            # 若 has_pending_tool_results=True 但无新未读消息，直接继续将工具结果送回 LLM
+
+            # 每次 LLM 调用前重置工具结果标志
+            has_pending_tool_results = False
 
             try:
                 response = await response.send(stream=False)
@@ -571,7 +578,10 @@ class DefaultChatter(BaseChatter):
                 else:
                     # 普通 action/tool：通过 run_tool_call 执行
                     trigger_msg = unreads[-1] if unreads else None
-                    await self.run_tool_call(call, response, usable_map, trigger_msg)
+                    appended, _ = await self.run_tool_call(call, response, usable_map, trigger_msg)
+                    if appended:
+                        # 有工具结果追加到 response，需要继续让 LLM 消费
+                        has_pending_tool_results = True
 
             # ── 若本轮全部 call 均为 action 类型，注入 SUSPEND 占位符 ──
             # action 执行后不需要 LLM 进一步响应结果，但为保持上下文规范
@@ -591,6 +601,7 @@ class DefaultChatter(BaseChatter):
 
             if should_wait:
                 # 等待新消息到来
+                has_pending_tool_results = False
                 yield Wait()
                 # 继续循环，让 LLM 基于更新后的上下文重新决策
                 continue

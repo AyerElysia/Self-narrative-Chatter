@@ -35,6 +35,10 @@ class DefaultChatterConfig(BaseConfig):
             default="enhanced",
             description="执行模式: enhanced/classical",
         )
+        reinforce_negative_behaviors: bool = Field(
+            default=True,
+            description="是否在每轮 user 提示词的 extra 板块中再次强调负面行为约束",
+        )
         theme_guide: ThemeGuideSection = Field(
             default_factory=ThemeGuideSection,
             description="按聊天类型区分的额外提示词",

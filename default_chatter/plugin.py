@@ -209,6 +209,30 @@ class DefaultChatter(BaseChatter):
             return plugin_config.plugin.mode
         return "enhanced"
 
+    def _build_negative_behaviors_extra(self) -> str:
+        """若配置启用，构建用于 user extra 板块的负面行为再次强调文本。
+
+        Returns:
+            str: 强调文本；未启用或无负面行为条目时返回空字符串
+        """
+        plugin_config = getattr(self.plugin, "config", None)
+        if not (
+            plugin_config
+            and isinstance(plugin_config, DefaultChatterConfig)
+            and plugin_config.plugin.reinforce_negative_behaviors
+        ):
+            return ""
+
+        negative_behaviors = get_core_config().personality.negative_behaviors
+        if not negative_behaviors:
+            return ""
+
+        lines = "\n".join(negative_behaviors)
+        return (
+            "行为提醒：请在本轮回复中严格遵守以下约束：\n"
+            f"{lines}"
+        )
+
     async def _build_system_prompt(self, chat_stream: ChatStream) -> str:
         """构建系统提示词"""
         selected_theme_guide = ""
@@ -252,6 +276,7 @@ class DefaultChatter(BaseChatter):
             chat_stream,
             history_text=history_block,
             unread_lines=unread_block,
+            extra=self._build_negative_behaviors_extra(),
         )
 
     def _build_enhanced_history_text(self, chat_stream: ChatStream) -> str:
@@ -459,6 +484,7 @@ class DefaultChatter(BaseChatter):
                     chat_stream,
                     history_text=history_text if not history_merged else "",
                     unread_lines=unread_lines,
+                    extra=self._build_negative_behaviors_extra(),
                 )
                 history_merged = True
 

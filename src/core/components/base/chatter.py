@@ -253,6 +253,20 @@ class BaseChatter(ABC):
             usable_cls = cast(type["BaseAction|BaseAgent|BaseTool"], usable_cls)  # 类型提示
             signature = usable_cls.get_signature() or usable_cls.__name__
 
+            chatter_allow = getattr(usable_cls, "chatter_allow", [])
+            if chatter_allow:
+                chatter_signature = self.get_signature()
+                allowed = self.chatter_name in chatter_allow
+                if chatter_signature and not allowed:
+                    allowed = chatter_signature in chatter_allow
+
+                if not allowed:
+                    allow_str = ", ".join(chatter_allow)
+                    reason = f"chatter 不匹配（允许: {allow_str}）"
+                    removals.append((signature, reason))
+                    logger.debug(f"[移除组件] {signature}：{reason}")
+                    continue
+
             if (
                 (issubclass(usable_cls, BaseAction) or issubclass(usable_cls, BaseAgent))
                 and usable_cls.associated_types

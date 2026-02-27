@@ -187,6 +187,49 @@ class TestBaseChatter:
         assert CrossPluginTool in result
 
     @pytest.mark.asyncio
+    async def test_modify_llm_usables_filters_by_chatter_allow(self):
+        """测试 modify_llm_usables 会按 chatter_allow 过滤组件。"""
+
+        class AllowedTool(BaseTool):
+            tool_name = "allowed_tool"
+            tool_description = "allowed"
+            chatter_allow = ["test_chatter"]
+
+            async def execute(self, *args, **kwargs):
+                return True, "ok"
+
+        class RejectedTool(BaseTool):
+            tool_name = "rejected_tool"
+            tool_description = "rejected"
+            chatter_allow = ["other_chatter"]
+
+            async def execute(self, *args, **kwargs):
+                return True, "ok"
+
+        class OpenTool(BaseTool):
+            tool_name = "open_tool"
+            tool_description = "open"
+
+            async def execute(self, *args, **kwargs):
+                return True, "ok"
+
+        chatter_plugin = MagicMock()
+        chatter = ConcreteChatter("stream_123", chatter_plugin)
+
+        mock_stream = MagicMock()
+        mock_stream.stream_id = "stream_123"
+        mock_stream.context = MagicMock()
+
+        with patch("src.core.components.base.chatter.get_stream_manager") as mock_sm:
+            mock_sm.return_value.get_or_create_stream = AsyncMock(return_value=mock_stream)
+
+            result = await chatter.modify_llm_usables([AllowedTool, RejectedTool, OpenTool])
+
+        assert AllowedTool in result
+        assert OpenTool in result
+        assert RejectedTool not in result
+
+    @pytest.mark.asyncio
     async def test_exec_llm_usable_uses_owner_plugin_instance(self):
         """测试执行跨插件 Tool 时向管理器传入所属插件实例。"""
 

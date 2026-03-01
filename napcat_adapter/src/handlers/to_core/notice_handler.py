@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -199,9 +200,13 @@ class NoticeHandler:
         # 使用 MessageBuilder 构建消息
         msg_builder = MessageBuilder()
 
+        # 生成唯一 notice ID：notice类型 + 用户ID + 群ID + 时间戳，避免主键冲突
+        _notice_id_raw = f"notice_{notice_type}_{user_id}_{group_id}_{message_time}"
+        unique_notice_id = "notice_" + hashlib.md5(_notice_id_raw.encode()).hexdigest()[:16]
+
         (
             msg_builder.direction("incoming")
-            .message_id("notice")
+            .message_id(unique_notice_id)
             .timestamp_ms(int(message_time * 1000))
             .from_user(
                 user_id=str(user_info.get("user_id", "")),

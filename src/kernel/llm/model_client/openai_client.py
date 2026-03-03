@@ -26,6 +26,15 @@ from ..roles import ROLE
 from .base import StreamEvent
 
 
+def _log_openai_request_body(api_name: str, params: dict[str, Any]) -> None:
+    """将 OpenAI 请求体送入请求检视器，便于在 WebUI 中核查 payload 结构。"""
+    try:
+        from src.kernel.llm.request_inspector import capture
+        capture(api_name, params)
+    except Exception:
+        pass
+
+
 def _build_httpx_timeout(timeout: float | None) -> Any:
     """根据总超时时间构造 httpx.Timeout 实例。
 
@@ -219,6 +228,19 @@ def _payloads_to_openai_messages(
 
                 if isinstance(part, Text) and content_text is None:
                     content_text = part.text
+                    continue
+
+                call_id_value = getattr(part, "call_id", None)
+                if tool_call_id is None and isinstance(call_id_value, str) and call_id_value:
+                    tool_call_id = call_id_value
+
+                to_text = getattr(part, "to_text", None)
+                if content_text is None and callable(to_text):
+                    try:
+                        text_value = to_text()
+                        content_text = text_value if isinstance(text_value, str) else str(text_value)
+                    except Exception:
+                        content_text = ""
 
             messages.append(
                 {
@@ -625,27 +647,34 @@ class OpenAIChatClient:
             params["max_tokens"] = max_tokens
         if isinstance(temperature, (int, float)):
             params["temperature"] = float(temperature)
+
+        # 允许每模型注入额外参数（如 top_p/response_format/tool_choice 等）
+        # 注意：tool_choice 的默认策略会在 tools 分支中补齐。
+        params.update(extra_params)
         if openai_tools and not tool_call_compat:
             params["tools"] = openai_tools
             if "tool_choice" not in params:
-                # 部分提供商需要显式指定 tool_choice 才会返回工具调用
+                # 默认策略：统一使用 required。
+                # 如果无法支持请在 model_set.extra_params 显式传入 tool_choice="auto"。
                 params["tool_choice"] = "required"
 
-            # 允许每模型注入额外参数（如 top_p/response_format/tool_choice 等）
-            params.update(extra_params)
-
-            # 新增：区分标准参数与非标准参数
-            standard_params = {
-                "model", "messages", "max_tokens", "temperature", "top_p", "n", "stream",
-                "stop", "presence_penalty", "frequency_penalty", "logit_bias", "user",
-                "tools", "tool_choice", "response_format", "seed", "parallel_tool_calls",
-                "functions", "function_call"
-            }
-            extra_body = {}
-            for key in list(params.keys()):
-                if key not in standard_params:
-                    extra_body[key] = params.pop(key)   # 从 params 中移除，存入 extra_body
-            if extra_body:
+        # 新增：区分标准参数与非标准参数（统一走 extra_body，避免 openai SDK 因未知参数报错）
+        standard_params = {
+            "model", "messages", "max_tokens", "temperature", "top_p", "n", "stream",
+            "stop", "presence_penalty", "frequency_penalty", "logit_bias", "user",
+            "tools", "tool_choice", "response_format", "seed", "parallel_tool_calls",
+            "functions", "function_call", "extra_body"
+        }
+        extra_body: dict[str, Any] = {}
+        for key in list(params.keys()):
+            if key not in standard_params:
+                extra_body[key] = params.pop(key)
+        if extra_body:
+            existing = params.get("extra_body")
+            if isinstance(existing, dict):
+                merged = {**existing, **extra_body}
+                params["extra_body"] = merged
+            else:
                 params["extra_body"] = extra_body
 
         if not stream:
@@ -701,6 +730,7 @@ class OpenAIChatClient:
             LLMContentFilterError: 模型返回空 choices 时抛出。
         """
         try:
+            _log_openai_request_body("chat.completions.create", params)
             resp = await client.chat.completions.create(**params)
         except Exception as e:
             err_name = type(e).__name__.lower()
@@ -756,6 +786,9 @@ class OpenAIChatClient:
         Returns:
             三元组 ``(None, None, AsyncIterator[StreamEvent])``。
         """
+        stream_params = dict(params)
+        stream_params["stream"] = True
+        _log_openai_request_body("chat.completions.create", stream_params)
         stream_resp = await client.chat.completions.create(**params, stream=True)
 
         async def iter_events() -> AsyncIterator[StreamEvent]:
@@ -871,6 +904,7 @@ class OpenAIChatClient:
         }
         params.update(extra_params)
 
+        _log_openai_request_body("embeddings.create", params)
         resp = await client.embeddings.create(**params)
         data = getattr(resp, "data", None)
         if not data:
@@ -949,6 +983,7 @@ class OpenAIChatClient:
             if isinstance(top_n, int) and top_n > 0:
                 params["top_n"] = top_n
 
+            _log_openai_request_body("rerank.create", params)
             maybe_resp = rerank_create(**params)
             if inspect.isawaitable(maybe_resp):
                 resp = await maybe_resp

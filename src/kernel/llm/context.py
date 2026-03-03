@@ -9,6 +9,7 @@ from .payload import LLMPayload
 from .payload.content import Content, Text
 from .payload.tooling import LLMUsable, ToolCall, ToolResult
 from .roles import ROLE
+from .exceptions import LLMContextError
 
 CompressionHook = Callable[[list[list[LLMPayload]], list[LLMPayload]], list[LLMPayload]]
 TokenCounter = Callable[[list[LLMPayload]], int]
@@ -20,7 +21,7 @@ class LLMContextManager:
 
     默认职责：
     1. 接管 payload 列表写入（add_payload/system/tool/reminder）；
-    2. 在写入后执行结构校验与最小修复（工具调用链补齐、孤立消息清理）；
+    2. 在写入后执行结构校验（strict，不做自动修复）；
     3. 最后按 max_payloads/token_budget 执行裁剪。
 
     对于 reminder：固定注入到“首个 USER 消息的首段”；若尚无 USER，则立即创建空 USER 并写入 reminder。
@@ -29,6 +30,14 @@ class LLMContextManager:
     max_payloads: int | None = None
     compression_hook: CompressionHook | None = None
     _reminders: list[Text] | None = None
+
+    def validate_for_send(self, payloads: list[LLMPayload]) -> None:
+        """在发起 LLM 请求前校验上下文结构。
+
+        不允许任何未闭合的 tool 调用链（包括尾部）。
+        """
+
+        self._validate_payloads(payloads, allow_incomplete_tail=False)
 
     def add_payload(
         self,
@@ -56,9 +65,108 @@ class LLMContextManager:
         else:
             updated.append(payload)
 
-        updated = self._normalize_payloads(updated)
         updated = self._apply_reminders(updated)
-        return self.maybe_trim(updated)
+        trimmed = self.maybe_trim(updated)
+
+        # strict：不做自动修复，但要尽早暴露“非尾部”的链路错误。
+        # 允许“尾部未闭合”的中间态（例如 assistant(tool_calls) 刚写入，tool_result 还没追加）。
+        self._validate_payloads(trimmed, allow_incomplete_tail=True)
+
+        return trimmed
+
+    def _validate_payloads(self, payloads: list[LLMPayload], *, allow_incomplete_tail: bool) -> None:
+        """校验 payloads 是否满足 OpenAI 兼容 messages 的基本结构约束。
+
+        约束（对对话消息 USER/ASSISTANT/TOOL_RESULT 生效；SYSTEM/TOOL 作为 pinned 不参与链路判断）：
+        - TOOL_RESULT 必须紧随带 tool_calls 的 ASSISTANT 之后；
+        - 若 ASSISTANT 含 tool_calls，则必须补齐所有对应 call_id 的 TOOL_RESULT；
+        - TOOL_RESULT 之后必须有 ASSISTANT 承接，才能进入下一条 USER。
+
+        Args:
+            payloads: 待校验的 payload 列表。
+            allow_incomplete_tail: 是否允许“尾部未闭合”的中间态。
+                - True：允许末尾是 ASSISTANT(tool_calls) 或 TOOL_RESULT（等待后续补齐）。
+                - False：必须完整闭合。
+        """
+
+        pinned_roles = {ROLE.SYSTEM, ROLE.TOOL}
+        convo = [p for p in payloads if p.role not in pinned_roles]
+
+        def _err(message: str) -> None:
+            roles = [p.role.value for p in convo]
+            raise LLMContextError(f"LLM 上下文不合法: {message}; roles={roles}")
+
+        idx = 0
+        while idx < len(convo):
+            payload = convo[idx]
+
+            if payload.role == ROLE.USER:
+                idx += 1
+                continue
+
+            if payload.role == ROLE.ASSISTANT:
+                if idx == 0:
+                    _err("对话不能以 assistant 开始")
+                prev_role = convo[idx - 1].role
+                if prev_role not in {ROLE.USER, ROLE.TOOL_RESULT}:
+                    _err("assistant 前必须是 user 或 tool_result")
+
+                tool_calls = [part for part in payload.content if isinstance(part, ToolCall)]
+                if not tool_calls:
+                    idx += 1
+                    continue
+
+                expected_ids: set[str] = set()
+                for part in tool_calls:
+                    if not part.id:
+                        _err("assistant.tool_calls 缺少 id（strict 模式不允许自动生成）")
+                    expected_ids.add(str(part.id))
+
+                j = idx + 1
+                if j >= len(convo):
+                    if allow_incomplete_tail:
+                        return
+                    _err("assistant(tool_calls) 后缺少 tool_result")
+
+                seen: set[str] = set()
+                while j < len(convo) and convo[j].role == ROLE.TOOL_RESULT:
+                    results = [part for part in convo[j].content if isinstance(part, ToolResult)]
+                    if not results:
+                        _err("tool_result payload 中缺少 ToolResult 内容")
+                    for result in results:
+                        if not result.call_id:
+                            _err("ToolResult 缺少 call_id")
+                        call_id = str(result.call_id)
+                        if call_id not in expected_ids:
+                            _err(f"ToolResult.call_id={call_id} 不匹配任何 tool_call")
+                        if call_id in seen:
+                            _err(f"重复的 ToolResult.call_id={call_id}")
+                        seen.add(call_id)
+                    j += 1
+
+                missing = expected_ids - seen
+                if missing:
+                    if allow_incomplete_tail and j >= len(convo):
+                        return
+                    _err(f"tool_result 未覆盖全部 tool_call: missing={sorted(missing)}")
+
+                # tool_result 后如果直接进入下一条 USER，是不合法的。
+                # 但 tool_result 作为尾部是合法且常见的（下一条 assistant 将由本次请求生成）。
+                if j < len(convo) and convo[j].role == ROLE.USER:
+                    _err("tool_result 后不能直接跟 user（缺少 assistant 承接）")
+
+                # 若后续还有消息且不是 USER，则必须是 ASSISTANT 才能继续对话。
+                if j < len(convo) and convo[j].role != ROLE.ASSISTANT:
+                    _err("tool_result 后只能是 assistant 或结束")
+
+                idx = j
+                continue
+
+            if payload.role == ROLE.TOOL_RESULT:
+                # 孤立 tool_result：一定非法（是否允许尾部取决于前面是否有 tool_calls）
+                _err("孤立的 tool_result（未紧随 assistant.tool_calls）")
+
+            _err(f"未知的对话角色: {payload.role}")
 
     def system(
         self,
@@ -106,147 +214,10 @@ class LLMContextManager:
             text_part = item if isinstance(item, Text) else Text(str(item))
             self._reminders.append(text_part)
 
-        updated = self._normalize_payloads(list(payloads))
-        updated = self._apply_reminders(updated)
-        return self.maybe_trim(updated)
-
-    def _normalize_payloads(self, payloads: list[LLMPayload]) -> list[LLMPayload]:
-        """默认结构校验与修复。
-
-        规则：
-        - 固定消息（SYSTEM/TOOL）保持原顺序；
-        - 对话消息仅保留合法链路：USER -> ASSISTANT，或 USER -> ASSISTANT(tool_calls) -> TOOL_RESULT* -> ASSISTANT；
-        - 对于 ASSISTANT tool_calls 缺失 TOOL_RESULT 的情况，自动补最小空结果占位；
-        - 孤立 ASSISTANT/TOOL_RESULT 直接丢弃。
-        """
-
-        pinned = [p for p in payloads if p.role in {ROLE.SYSTEM, ROLE.TOOL}]
-        convo = [p for p in payloads if p.role not in {ROLE.SYSTEM, ROLE.TOOL}]
-
-        normalized: list[LLMPayload] = []
-        idx = 0
-
-        while idx < len(convo):
-            payload = convo[idx]
-
-            if payload.role == ROLE.USER:
-                normalized.append(payload)
-                idx += 1
-                continue
-
-            if payload.role == ROLE.ASSISTANT:
-                if not normalized or normalized[-1].role not in {ROLE.USER, ROLE.TOOL_RESULT}:
-                    idx += 1
-                    continue
-
-                repaired_assistant, expected_ids = self._repair_assistant_tool_calls(payload)
-                normalized.append(repaired_assistant)
-                idx += 1
-
-                if not expected_ids:
-                    continue
-
-                seen_ids: set[str] = set()
-                while idx < len(convo) and convo[idx].role == ROLE.TOOL_RESULT:
-                    repaired_result, call_ids = self._repair_tool_result_payload(convo[idx], expected_ids - seen_ids)
-                    if repaired_result is not None:
-                        normalized.append(repaired_result)
-                    if call_ids:
-                        seen_ids.update(call_ids)
-                    idx += 1
-
-                pending_ids = expected_ids - seen_ids
-                should_defer_fill = idx >= len(convo)
-
-                if pending_ids and not should_defer_fill:
-                    for missing_id in pending_ids:
-                        normalized.append(
-                            LLMPayload(
-                                ROLE.TOOL_RESULT,
-                                ToolResult(value="", call_id=missing_id),
-                            )
-                        )
-
-                    if idx >= len(convo) or convo[idx].role != ROLE.ASSISTANT:
-                        normalized.append(LLMPayload(ROLE.ASSISTANT, Text("")))
-
-                continue
-
-            # TOOL_RESULT 孤立消息：直接清理
-            idx += 1
-
-        return pinned + normalized
-
-    def _repair_assistant_tool_calls(
-        self,
-        payload: LLMPayload,
-    ) -> tuple[LLMPayload, set[str]]:
-        """修复 assistant tool call，补齐缺失 id。"""
-
-        expected_ids: set[str] = set()
-        repaired_content: list[Content | LLMUsable] = []
-        tool_index = 0
-
-        for part in payload.content:
-            if not isinstance(part, ToolCall):
-                repaired_content.append(part)
-                continue
-
-            call_id = part.id if part.id else f"auto_call_{tool_index}"
-            tool_index += 1
-            expected_ids.add(call_id)
-            repaired_content.append(ToolCall(id=call_id, name=part.name, args=part.args))
-
-        if not expected_ids:
-            return payload, expected_ids
-
-        return LLMPayload(ROLE.ASSISTANT, repaired_content), expected_ids
-
-    def _repair_tool_result_payload(
-        self,
-        payload: LLMPayload,
-        candidate_ids: set[str],
-    ) -> tuple[LLMPayload | None, set[str]]:
-        """修复 TOOL_RESULT payload，必要时补齐 call_id。"""
-
-        tool_results = [part for part in payload.content if isinstance(part, ToolResult)]
-        if not tool_results:
-            if len(candidate_ids) == 1:
-                only_id = next(iter(candidate_ids))
-                return LLMPayload(ROLE.TOOL_RESULT, ToolResult(value="", call_id=only_id)), {only_id}
-            return None, set()
-
-        repaired_parts: list[ToolResult] = []
-        consumed_ids: set[str] = set()
-
-        for part in tool_results:
-            call_id = part.call_id
-            if not call_id and len(candidate_ids - consumed_ids) == 1:
-                call_id = next(iter(candidate_ids - consumed_ids))
-
-            if call_id is None:
-                continue
-            if candidate_ids and call_id not in candidate_ids:
-                continue
-            if call_id in consumed_ids:
-                continue
-
-            repaired_parts.append(
-                ToolResult(
-                    value=part.value,
-                    call_id=call_id,
-                    name=part.name,
-                )
-            )
-            consumed_ids.add(call_id)
-
-        if not repaired_parts:
-            if len(candidate_ids) == 1:
-                only_id = next(iter(candidate_ids))
-                return LLMPayload(ROLE.TOOL_RESULT, ToolResult(value="", call_id=only_id)), {only_id}
-            return None, set()
-
-        return LLMPayload(ROLE.TOOL_RESULT, repaired_parts), consumed_ids
+        updated = self._apply_reminders(list(payloads))
+        trimmed = self.maybe_trim(updated)
+        self._validate_payloads(trimmed, allow_incomplete_tail=True)
+        return trimmed
 
     def _apply_reminders(self, payloads: list[LLMPayload]) -> list[LLMPayload]:
         """将 reminder 固定注入首个 USER 消息首段。"""

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from src.kernel.llm.context import LLMContextManager
 from src.kernel.llm.payload import LLMPayload, Text, ToolCall, ToolResult
 from src.kernel.llm.request import LLMRequest
+from src.kernel.llm.exceptions import LLMContextError
 from src.kernel.llm.roles import ROLE
 
 
@@ -213,7 +216,8 @@ def test_context_manager_keeps_multiple_tool_results_in_merged_payload() -> None
     assert result_by_id["call_2"].name == "finish_task"
 
 
-def test_context_manager_repairs_missing_tool_result_when_chain_continues() -> None:
+def test_context_manager_raises_when_tool_chain_is_broken_by_new_user() -> None:
+    """strict 模式下：不自动补齐 tool_result；若 tool_calls 未闭合就进入下一条 USER，应直接报错。"""
     manager = LLMContextManager(max_payloads=20)
     payloads = [LLMPayload(ROLE.USER, Text("帮我调用工具"))]
 
@@ -227,12 +231,34 @@ def test_context_manager_repairs_missing_tool_result_when_chain_continues() -> N
             ],
         ),
     )
-    payloads = manager.add_payload(payloads, LLMPayload(ROLE.USER, Text("继续")))
 
-    assert len(payloads) == 5
-    assert payloads[2].role == ROLE.TOOL_RESULT
-    result = next(part for part in payloads[2].content if isinstance(part, ToolResult))
-    assert result.call_id == "call_1"
-    assert result.value == ""
-    assert payloads[3].role == ROLE.ASSISTANT
-    assert payloads[4].role == ROLE.USER
+    with pytest.raises(LLMContextError):
+        manager.add_payload(payloads, LLMPayload(ROLE.USER, Text("继续")))
+
+
+def test_context_manager_raises_when_user_follows_tool_result_without_assistant() -> None:
+    """strict 模式下：TOOL_RESULT 后必须由 ASSISTANT 承接；否则直接报错。"""
+    manager = LLMContextManager(max_payloads=20)
+    payloads = [LLMPayload(ROLE.USER, Text("先调用工具"))]
+
+    payloads = manager.add_payload(
+        payloads,
+        LLMPayload(
+            ROLE.ASSISTANT,
+            [
+                Text("我将调用工具"),
+                ToolCall(id="call_1", name="web_search", args={"query": "x"}),
+            ],
+        ),
+    )
+
+    payloads = manager.add_payload(
+        payloads,
+        LLMPayload(
+            ROLE.TOOL_RESULT,
+            ToolResult(value="result", call_id="call_1", name="web_search"),
+        ),
+    )
+
+    with pytest.raises(LLMContextError):
+        manager.add_payload(payloads, LLMPayload(ROLE.USER, Text("继续")))

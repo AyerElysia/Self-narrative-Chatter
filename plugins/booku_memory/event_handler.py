@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import random
+import time
 from typing import TYPE_CHECKING, Any
 
 from src.app.plugin_system.api.log_api import get_logger
@@ -208,6 +209,22 @@ class MemoryFlashbackInjector(BaseEventHandler):
         super().__init__(plugin)
         self._repo = None
         self._repo_initialized = False
+        self._recent_flashbacks: dict[str, float] = {}
+
+    def _prune_recent_flashbacks(self, now: float, cooldown_seconds: int) -> None:
+        """清理过期的近期闪回记录。"""
+
+        if cooldown_seconds <= 0:
+            self._recent_flashbacks.clear()
+            return
+
+        expired: list[str] = []
+        for memory_id, ts in self._recent_flashbacks.items():
+            if now - ts >= cooldown_seconds:
+                expired.append(memory_id)
+
+        for memory_id in expired:
+            self._recent_flashbacks.pop(memory_id, None)
 
     async def _get_repo(self) -> "BookuMemoryMetadataRepository":
         from .config import BookuMemoryConfig
@@ -271,6 +288,24 @@ class MemoryFlashbackInjector(BaseEventHandler):
             limit=int(fb.candidate_limit),
             include_deleted=False,
         )
+
+        cooldown_seconds = int(getattr(fb, "cooldown_seconds", 0) or 0)
+        now = time.time()
+        self._prune_recent_flashbacks(now=now, cooldown_seconds=cooldown_seconds)
+        if cooldown_seconds > 0 and records:
+            before_count = len(records)
+            records = [
+                r
+                for r in records
+                if str(getattr(r, "memory_id", "") or "") not in self._recent_flashbacks
+            ]
+            if not records:
+                logger.info(
+                    "flashback 已触发但候选均处于冷却期（"
+                    f"bucket={bucket}, folder_id={folder_id}, cooldown_seconds={cooldown_seconds}, candidates={before_count}）"
+                )
+                return EventDecision.SUCCESS, params
+
         if not records:
             logger.info(
                 f"flashback 已触发但无候选记忆（bucket={bucket}, folder_id={folder_id}, limit={int(fb.candidate_limit)}）"
@@ -288,6 +323,10 @@ class MemoryFlashbackInjector(BaseEventHandler):
         if picked is None:
             return EventDecision.SUCCESS, params
 
+        picked_id = str(getattr(picked, "memory_id", "") or "")
+        if cooldown_seconds > 0 and picked_id:
+            self._recent_flashbacks[picked_id] = now
+
         values: dict[str, Any] = params.get("values", {})
         existing_extra: str = values.get("extra", "") or ""
         block = self._format_flashback_block(getattr(picked, "content", ""))
@@ -298,6 +337,6 @@ class MemoryFlashbackInjector(BaseEventHandler):
         params["values"] = values
 
         logger.info(
-            f"已注入记忆闪回（bucket={bucket}, memory_id={str(getattr(picked, 'memory_id', ''))}）"
+            f"已注入记忆闪回（bucket={bucket}, memory_id={picked_id}）"
         )
         return EventDecision.SUCCESS, params

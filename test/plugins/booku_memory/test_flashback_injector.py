@@ -181,6 +181,97 @@ async def test_flashback_injector_skips_other_templates() -> None:
 
 
 @pytest.mark.asyncio
+async def test_flashback_injector_dedup_in_cooldown_window(tmp_path: Path) -> None:
+    """同一条记忆在冷却期内不会重复闪回。"""
+
+    from plugins.booku_memory.config import BookuMemoryConfig
+    from plugins.booku_memory.event_handler import MemoryFlashbackInjector
+    from src.kernel.event import EventDecision
+
+    db_path = str(tmp_path / "flashback_cooldown.db")
+    repo = BookuMemoryMetadataRepository(db_path)
+    await repo.initialize()
+
+    await repo.upsert_record(
+        memory_id="m_only",
+        title="t",
+        folder_id="folder_a",
+        bucket="archived",
+        content="唯一候选记忆",
+        source="unit_test",
+        novelty_energy=0.1,
+        tags=[],
+        core_tags=[],
+        diffusion_tags=[],
+        opposing_tags=[],
+    )
+
+    cfg = BookuMemoryConfig()
+    cfg.storage.metadata_db_path = db_path
+    cfg.flashback.enabled = True
+    cfg.flashback.trigger_probability = 1.0
+    cfg.flashback.archived_probability = 1.0
+    cfg.flashback.folder_id = "folder_a"
+    cfg.flashback.candidate_limit = 50
+    cfg.flashback.activation_weight_exponent = 1.0
+    cfg.flashback.cooldown_seconds = 60
+
+    class _DummyPlugin:
+        config = cfg
+
+    handler = MemoryFlashbackInjector(plugin=_DummyPlugin())
+
+    params: dict[str, Any] = {
+        "name": "default_chatter_user_prompt",
+        "template": "{extra}",
+        "values": {"extra": ""},
+        "policies": {},
+        "strict": False,
+    }
+
+    import plugins.booku_memory.event_handler as eh
+
+    rand_seq = iter([0.0, 0.0, 0.01, 0.0, 0.0, 0.01])
+
+    def _rand() -> float:
+        return next(rand_seq)
+
+    time_values = [1000.0, 1030.0]
+
+    def _time() -> float:
+        if time_values:
+            return time_values.pop(0)
+        return 1030.0
+
+    old_rand = eh.random.random
+    old_time = eh.time.time
+    eh.random.random = _rand
+    eh.time.time = _time
+    try:
+        decision1, out1 = await handler.execute("on_prompt_build", params)
+        extra1 = out1["values"]["extra"]
+        decision2, out2 = await handler.execute("on_prompt_build", params)
+        extra2 = out2["values"]["extra"]
+    finally:
+        eh.random.random = old_rand
+        eh.time.time = old_time
+        await repo.close()
+        repo_from_handler = cast(
+            BookuMemoryMetadataRepository | None,
+            getattr(handler, "_repo", None),
+        )
+        if repo_from_handler is not None:
+            await repo_from_handler.close()
+
+    assert decision1 is EventDecision.SUCCESS
+    assert "## 记忆闪回" in extra1
+    assert "唯一候选记忆" in extra1
+
+    assert decision2 is EventDecision.SUCCESS
+    assert extra2 == extra1
+
+
+@pytest.mark.asyncio
 async def test_memory_prompt_injector_injects_inherent_into_system_prompt(tmp_path: Path) -> None:
     from plugins.booku_memory.config import BookuMemoryConfig
     from plugins.booku_memory.event_handler import MemoryPromptInjector

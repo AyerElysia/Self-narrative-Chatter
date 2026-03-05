@@ -156,6 +156,13 @@ class BookuMemoryConfig(BaseConfig):
                 "指数越大越偏向低激活记忆。"
             ),
         )
+        cooldown_seconds: int = Field(
+            default=3600,
+            description=(
+                "闪回去重冷却时间（秒）。当某条记忆被触发闪回后，在该时间内不会再次被闪回；"
+                "设为 0 表示不启用去重。"
+            ),
+        )
 
     plugin: PluginSection = Field(default_factory=PluginSection)
     storage: StorageSection = Field(default_factory=StorageSection)

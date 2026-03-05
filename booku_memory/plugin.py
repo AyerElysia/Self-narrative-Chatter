@@ -12,7 +12,7 @@ from .agent.tools import (
     BookuMemoryRetrieveTool,
 )
 from .config import BookuMemoryConfig
-from .event_handler import MemoryPromptInjector
+from .event_handler import MemoryFlashbackInjector, MemoryPromptInjector
 from .service import BookuMemoryService
 
 logger = get_logger("booku_memory_plugin")
@@ -42,6 +42,7 @@ class BookuMemoryAgentPlugin(BasePlugin):
                     BookuMemoryReadAgent,
                     BookuMemoryService,
                     MemoryPromptInjector,
+                    MemoryFlashbackInjector,
                 ]
 
             return [
@@ -50,7 +51,14 @@ class BookuMemoryAgentPlugin(BasePlugin):
                 BookuMemoryEditInherentTool,
                 BookuMemoryService,
                 MemoryPromptInjector,
+                MemoryFlashbackInjector,
             ]
 
         # 配置对象不可用时保持历史行为：默认启用 agent 代理模式。
-        return [BookuMemoryWriteAgent, BookuMemoryReadAgent, BookuMemoryService, MemoryPromptInjector]
+        return [
+            BookuMemoryWriteAgent,
+            BookuMemoryReadAgent,
+            BookuMemoryService,
+            MemoryPromptInjector,
+            MemoryFlashbackInjector,
+        ]

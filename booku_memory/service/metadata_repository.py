@@ -58,6 +58,14 @@ class BookuMemoryMetadataRepository:
         """初始化数据库（建表）。"""
         await self._db.initialize()
 
+    async def close(self) -> None:
+        """关闭底层 PluginDatabase 连接并清理资源。
+
+        在测试或插件卸载时建议调用，避免 aiosqlite 后台线程在事件循环关闭后回调。
+        """
+
+        await self._db.close()
+
     # ------------------------------------------------------------------
     # 内部辅助
     # ------------------------------------------------------------------
@@ -372,7 +380,7 @@ class BookuMemoryMetadataRepository:
                 stmt = stmt.where(R.folder_id == folder_id)
             stmt = stmt.values(bucket="archived", is_archived=1, updated_at=now)
             result = await s.execute(stmt)
-            return int(result.rowcount)
+            return int(getattr(result, "rowcount", 0) or 0)
 
     async def move_records(
         self,
@@ -413,7 +421,7 @@ class BookuMemoryMetadataRepository:
                 .where(R.memory_id.in_(memory_ids), R.is_deleted == 0)
                 .values(**update_vals)
             )
-            return int(result.rowcount)
+            return int(getattr(result, "rowcount", 0) or 0)
 
     async def soft_delete_records(self, memory_ids: list[str]) -> int:
         """将指定记忆标记为软删除（is_deleted=1）。
@@ -436,7 +444,7 @@ class BookuMemoryMetadataRepository:
                 .where(R.memory_id.in_(memory_ids), R.is_deleted == 0)
                 .values(is_deleted=1, deleted_at=now, updated_at=now)
             )
-            return int(result.rowcount)
+            return int(getattr(result, "rowcount", 0) or 0)
 
     async def hard_delete_records(self, memory_ids: list[str]) -> int:
         """硬删除指定记忆（元数据 + 全部标签）。
@@ -456,7 +464,7 @@ class BookuMemoryMetadataRepository:
         async with self._db.session() as s:
             await s.execute(delete(T).where(T.memory_id.in_(memory_ids)))
             result = await s.execute(delete(R).where(R.memory_id.in_(memory_ids)))
-            return int(result.rowcount)
+            return int(getattr(result, "rowcount", 0) or 0)
 
     async def update_activated(self, memory_id: str) -> None:
         """原子将指定记忆的激活计数 +1 并更新最近激活时间。
@@ -567,6 +575,37 @@ class BookuMemoryMetadataRepository:
         if not include_deleted:
             qb = qb.filter(is_deleted=0)
         rows = await qb.order_by("-updated_at").limit(max(1, limit)).all()
+        return [self._to_record(r) for r in rows]  # type: ignore[arg-type]
+
+    async def list_records_by_bucket(
+        self,
+        *,
+        bucket: str,
+        folder_id: str | None = None,
+        limit: int = 300,
+        include_deleted: bool = False,
+    ) -> list[BookuMemoryRecord]:
+        """按 bucket 列出记忆记录列表。
+
+        主要用于 prompt 注入类功能（如“记忆闪回”）快速加载候选。
+        为避免全表扫描，结果按 updated_at 倒序并截断到 limit。
+
+        Args:
+            bucket: 目标 bucket（如 "emergent"、"archived"、"inherent"）。
+            folder_id: 限定文件夹；为 None 时不限定。
+            limit: 最大返回条数，至少为 1。
+            include_deleted: 是否包含已删除记录，默认 False。
+
+        Returns:
+            满足条件的 ``BookuMemoryRecord`` 列表（按 updated_at 倒序）。
+        """
+
+        qb = self._db.query(BookuMemoryRecordModel).filter(bucket=bucket)
+        if folder_id is not None:
+            qb = qb.filter(folder_id=folder_id)
+        if not include_deleted:
+            qb = qb.filter(is_deleted=0)
+        rows = await qb.order_by("-updated_at").limit(max(1, int(limit))).all()
         return [self._to_record(r) for r in rows]  # type: ignore[arg-type]
 
     async def list_memory_ids_by_folder(

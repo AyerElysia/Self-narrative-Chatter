@@ -122,9 +122,45 @@ class BookuMemoryConfig(BaseConfig):
             description="内部 tool-calling 最大推理轮数",
         )
 
+    @config_section("flashback")
+    class FlashbackSection(SectionBase):
+        """记忆闪回配置。
+
+        闪回机制在构建 default_chatter 的 user prompt 时生效：
+        - 先按 ``trigger_probability`` 判定是否触发；
+        - 触发后按 ``archived_probability`` 判定抽取归档层/隐现层；
+        - 在目标层随机抽取一条记忆，激活次数越低越容易被抽到。
+        """
+
+        enabled: bool = Field(default=False, description="是否启用记忆闪回机制")
+        trigger_probability: float = Field(
+            default=0.05,
+            description="每次构建 user prompt 时触发闪回的概率（0~1）",
+        )
+        archived_probability: float = Field(
+            default=0.6,
+            description="触发闪回后抽取归档层记忆的概率（0~1）；隐现层概率为 1-该值",
+        )
+        folder_id: str | None = Field(
+            default=None,
+            description="限定抽取的 folder_id；为 None 时在所有 folder 中抽取",
+        )
+        candidate_limit: int = Field(
+            default=50,
+            description="每次抽取时最多加载的候选记忆数量（按 updated_at 倒序截断）",
+        )
+        activation_weight_exponent: float = Field(
+            default=1.0,
+            description=(
+                "激活次数权重指数。抽取权重为 1/(activation_count+1)^exponent；"
+                "指数越大越偏向低激活记忆。"
+            ),
+        )
+
     plugin: PluginSection = Field(default_factory=PluginSection)
     storage: StorageSection = Field(default_factory=StorageSection)
     retrieval: RetrievalSection = Field(default_factory=RetrievalSection)
     write_conflict: WriteConflictSection = Field(default_factory=WriteConflictSection)
     time_window: TimeWindowSection = Field(default_factory=TimeWindowSection)
     internal_llm: InternalLLMSection = Field(default_factory=InternalLLMSection)
+    flashback: FlashbackSection = Field(default_factory=FlashbackSection)

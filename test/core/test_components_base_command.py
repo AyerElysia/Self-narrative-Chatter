@@ -78,7 +78,7 @@ class TestBaseCommand:
 
     def test_command_initialization(self, mock_plugin):
         """测试 Command 初始化。"""
-        command = ConcreteCommand(mock_plugin)
+        command = ConcreteCommand(mock_plugin, stream_id="")
         assert command.plugin == mock_plugin
         assert command.command_name == "test"
         assert command.command_prefix == "/"
@@ -87,16 +87,16 @@ class TestBaseCommand:
 
     def test_get_signature(self, mock_plugin):
         """测试获取签名。"""
-        command = ConcreteCommand(mock_plugin)
+        command = ConcreteCommand(mock_plugin, stream_id="")
         assert command.get_signature() is None
 
         ConcreteCommand._plugin_ = "my_plugin"
-        command2 = ConcreteCommand(mock_plugin)
+        command2 = ConcreteCommand(mock_plugin, stream_id="")
         assert command2.get_signature() == "my_plugin:command:test"
 
     def test_match(self, mock_plugin):
         """测试命令匹配。"""
-        command = ConcreteCommand(mock_plugin)
+        command = ConcreteCommand(mock_plugin, stream_id="")
 
         # 匹配 command_name
         assert command.match(["test"]) == 1
@@ -108,12 +108,12 @@ class TestBaseCommand:
 
     def test_match_empty_parts(self, mock_plugin):
         """测试空片段列表。"""
-        command = ConcreteCommand(mock_plugin)
+        command = ConcreteCommand(mock_plugin, stream_id="")
         assert command.match([]) == 0
 
     def test_build_command_tree(self, mock_plugin):
         """测试构建命令树。"""
-        command = ConcreteCommand(mock_plugin)
+        command = ConcreteCommand(mock_plugin, stream_id="")
 
         # 检查根节点的子节点
         assert "set" in command._root.children
@@ -131,7 +131,7 @@ class TestBaseCommand:
 
     def test_register_route(self, mock_plugin):
         """测试注册路由。"""
-        command = ConcreteCommand(mock_plugin)
+        command = ConcreteCommand(mock_plugin, stream_id="")
 
         async def test_handler():
             return True, "test"
@@ -147,26 +147,44 @@ class TestBaseCommand:
         """测试执行简单命令。"""
         import asyncio
 
-        command = ConcreteCommand(mock_plugin)
-        success, result = asyncio.run(command.execute("/get"))
+        command = ConcreteCommand(mock_plugin, stream_id="")
+        success, result = asyncio.run(command.execute("get"))
         assert success is True
         assert result == "Value: 42"
+
+    def test_execute_rejects_prefixed_text(self, mock_plugin):
+        """测试 execute 拒绝带前缀的原始命令文本。"""
+        import asyncio
+
+        command = ConcreteCommand(mock_plugin, stream_id="")
+        success, result = asyncio.run(command.execute("/get"))
+        assert success is False
+        assert "去掉前缀后" in result
 
     def test_execute_nested_command(self, mock_plugin):
         """测试执行嵌套命令。"""
         import asyncio
 
-        command = ConcreteCommand(mock_plugin)
+        command = ConcreteCommand(mock_plugin, stream_id="")
         # 命令直接是子路由，不需要包含 command_name
         success, result = asyncio.run(command.execute("set value 42"))
         assert success is True
         assert "Value set to 42" in result
 
-    def test_execute_without_prefix(self, mock_plugin):
-        """测试不带前缀执行命令。"""
+    def test_execute_rejects_command_name_text(self, mock_plugin):
+        """测试 execute 拒绝仍包含 command_name 的文本。"""
         import asyncio
 
-        command = ConcreteCommand(mock_plugin)
+        command = ConcreteCommand(mock_plugin, stream_id="")
+        success, result = asyncio.run(command.execute("test set value 42"))
+        assert success is False
+        assert "去掉 command_name 后" in result
+
+    def test_execute_without_prefix(self, mock_plugin):
+        """测试执行子路由文本。"""
+        import asyncio
+
+        command = ConcreteCommand(mock_plugin, stream_id="")
         success, result = asyncio.run(command.execute("get"))
         assert success is True
         assert result == "Value: 42"
@@ -175,7 +193,7 @@ class TestBaseCommand:
         """测试执行空命令。"""
         import asyncio
 
-        command = ConcreteCommand(mock_plugin)
+        command = ConcreteCommand(mock_plugin, stream_id="")
         success, result = asyncio.run(command.execute(""))
         assert success is False
 
@@ -183,8 +201,8 @@ class TestBaseCommand:
         """测试执行无效命令。"""
         import asyncio
 
-        command = ConcreteCommand(mock_plugin)
-        success, result = asyncio.run(command.execute("/invalid"))
+        command = ConcreteCommand(mock_plugin, stream_id="")
+        success, result = asyncio.run(command.execute("invalid"))
         # 无效命令会生成帮助信息，返回 True
         assert success is True
         assert "未知" in result
@@ -201,8 +219,8 @@ class TestBaseCommand:
 
         import asyncio
 
-        command = CustomPrefixCommand(mock_plugin)
-        success, result = asyncio.run(command.execute("!test"))
+        command = CustomPrefixCommand(mock_plugin, stream_id="")
+        success, result = asyncio.run(command.execute("test"))
         assert success is True
         assert result == "test result"
 
@@ -217,7 +235,7 @@ class TestBaseCommand:
                 async def handle(self) -> tuple[bool, str]:
                     return True, "ok"
 
-            command = PermCommand(mock_plugin)
+            command = PermCommand(mock_plugin, stream_id="")
             assert command.permission_level == level
 
 
@@ -241,7 +259,7 @@ class TestCommandAttributes:
             async def handle(self) -> tuple[bool, str]:
                 return True, "ok"
 
-        command = FullCommand(mock_plugin)
+        command = FullCommand(mock_plugin, stream_id="")
         assert command.command_name == "full_command"
         assert command.command_description == "Full command description"
         assert command.command_prefix == "."

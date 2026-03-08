@@ -233,15 +233,44 @@ class CommandManager:
         # 创建 Command 实例并执行
         try:
             command_instance = command_cls(plugin=plugin,stream_id=message.stream_id)
+            routed_text = self._extract_routed_text(command_text, command_path)
             # 传入 stream_id 以便命令可以访问聊天流信息
             result = await command_instance.execute(
-                message_text=command_text,
+                message_text=routed_text,
             )
             return result
 
         except Exception as e:
             logger.error(f"执行命令失败 ({command_path}): {e}")
             return False, f"命令执行失败: {e}"
+
+    def _extract_routed_text(self, text: str, command_path: str) -> str:
+        """提取传给 BaseCommand 的子路由文本。
+
+        Args:
+            text: 原始命令文本
+            command_path: 已匹配的命令路径
+
+        Returns:
+            str: 去掉前缀和 command_path 后的子路由文本
+        """
+        stripped = text.strip()
+
+        for prefix in self._command_prefixes:
+            if stripped.startswith(prefix):
+                stripped = stripped[len(prefix) :].strip()
+                break
+
+        if not command_path:
+            return stripped
+
+        if stripped == command_path:
+            return ""
+
+        if stripped.startswith(f"{command_path} "):
+            return stripped[len(command_path) :].strip()
+
+        return stripped
 
     def get_command_help(self, signature: str) -> str:
         """获取命令帮助信息。

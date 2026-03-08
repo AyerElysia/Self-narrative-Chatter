@@ -170,14 +170,20 @@ class BaseCommand(ABC):
         插件开发者通常不需要重写此方法，而是使用 @cmd_route 装饰器定义处理函数。
 
         Args:
-            message_text: 完整的消息文本 (例如 "/time set seconds 30")
+            message_text: 已完成归一化的子路由文本。
+                该文本必须已经移除命令前缀和 command_name，例如 "set seconds 30"。
 
         Returns:
             tuple[bool, str]: (是否成功, 返回结果/错误信息)
         """
-        # 移除命令前缀
+        message_text = message_text.strip()
+
         if message_text.startswith(self.command_prefix):
-            message_text = message_text[len(self.command_prefix):].strip()
+            return False, "命令文本格式错误：BaseCommand.execute 只接受去掉前缀后的子路由文本"
+
+        parts = message_text.split(maxsplit=1)
+        if parts and parts[0] == self.command_name:
+            return False, "命令文本格式错误：BaseCommand.execute 只接受去掉 command_name 后的子路由文本"
 
         return await self._route_and_execute(message_text)
 

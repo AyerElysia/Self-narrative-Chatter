@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from src.app.plugin_system.types import TaskType
 from src.kernel.llm import (
     EmbeddingRequest,
     LLMContextManager,
@@ -16,16 +16,6 @@ from src.core.config import get_model_config
 
 if TYPE_CHECKING:
     from src.core.prompt import SystemReminderBucket
-
-class TaskType(Enum):
-    UTILS = "utils"
-    UTILS_SMALL = "utils_small"
-    ACTOR = "actor"
-    SUB_ACTOR = "sub_actor"
-    VLM = "vlm"
-    VOICE = "voice"
-    VIDEO = "video"
-    TOOL_USE = "tool_use"
 
 
 def create_llm_request(

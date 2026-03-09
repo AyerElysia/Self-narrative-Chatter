@@ -17,7 +17,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.app.plugin_system.api import prompt_api
-from src.core.prompt import PromptTemplate
+from src.app.plugin_system.types import PromptTemplate
 
 
 async def main() -> None:

@@ -1390,7 +1390,7 @@ class BookuMemoryService(BaseService):
             if use_archived:
                 collections.append(self._collection_name("archived", search_folder))
             if use_knowledge:
-                collections.append(self._collection_name("knowledge", search_folder))
+                collections.append(self._collection_name("knowledge", "default"))
 
         async def _collect_candidates(
             embedding: list[float], per_collection_limit: int

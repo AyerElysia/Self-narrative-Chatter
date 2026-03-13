@@ -134,7 +134,8 @@ class BookuMemoryReadAgent(BaseAgent):
             "  • 语义扩展：query同义/相关词 + 宽泛tags\n"
             "  • 场景关联：从任务场景反推可能的记忆类型\n"
             "- 建议先设置 include_archived=false，若无结果再尝试 true\n"
-            "- 若问题与专业知识相关，建议设置 include_knowledge=true, 若无需访问知识库或已经访问过但无结果则设为 false\n\n"
+            "- 若问题与专业知识相关，建议设置 include_knowledge=true, 若无需访问知识库或已经访问过但无结果则设为 false\n"
+            "- user如果在payload中显式设置了include_knowledge=true或include_archived=true, 那这些参数必须被严格遵守, 不能忽略或改变\n\n"
 
             "### 阶段3：结果评估与全文读取\n"
             "- 阅读 memory_retrieve 返回的片段结果，判断：\n"
@@ -203,6 +204,7 @@ class BookuMemoryReadAgent(BaseAgent):
         opposing_tags: Annotated[list[str], "对立标签，抑制不希望召回的方向"],
         context: Annotated[str, "当前对话上下文（可选），辅助语义精确化，推荐填写以帮助agent理解检索场景"] = "",
         include_archived: Annotated[bool, "是否检索归档层（默认 False）"] = False,
+        include_knowledge: Annotated[bool, "是否检索知识库（默认 False）"] = False,
     ) -> tuple[bool, str | dict[str, Any]]:
         """执行记忆检索与综合任务，内部将运行多轮 LLM 工具调用循环。
 
@@ -219,6 +221,7 @@ class BookuMemoryReadAgent(BaseAgent):
             opposing_tags: 对立标签，为内部 LLM 提供检索抽象限制。
             context: 对话上下文文本，会被拼接到 intent_text 后一起加入检索。
             include_archived: 传递给内部 LLM 的归档层检索开关，默认 False。
+            include_knowledge: 传递给内部 LLM 的知识库检索开关，默认 False。
 
         Returns:
             成功时返回 ``(True, summary_text)``，summary_text 为内部 LLM 生成的
@@ -245,17 +248,21 @@ class BookuMemoryReadAgent(BaseAgent):
                 LLMPayload(
                     ROLE.USER,
                     Text(
-                        json.dumps(
-                            {
-                                "intent_text": intent_text.strip(),
-                                "context": context.strip(),
-                                "query_text": query_text,
-                                "core_tags": core_tags or [],
-                                "diffusion_tags": diffusion_tags or [],
-                                "opposing_tags": opposing_tags or [],
-                                "include_archived": include_archived,
-                            },
-                            ensure_ascii=False,
+                        "\n".join(
+                            ("以下参数必须严格遵守，不能忽略或改变：\n",
+                            json.dumps(
+                                {
+                                    "intent_text": intent_text.strip(),
+                                    "context": context.strip(),
+                                    "query_text": query_text,
+                                    "core_tags": core_tags or [],
+                                    "diffusion_tags": diffusion_tags or [],
+                                    "opposing_tags": opposing_tags or [],
+                                    "include_archived": include_archived,
+                                    "include_knowledge": include_knowledge,
+                                },
+                                ensure_ascii=False,
+                            ))
                         )
                     ),
                 )
@@ -270,7 +277,7 @@ class BookuMemoryReadAgent(BaseAgent):
             for step_index in range(max_steps):
                 calls = response.call_list or []
                 if not calls:
-                    break
+                    return True, (response.message or "").strip()
                 for call in calls:
                     logger.info(f"调用工具：{call.name}")
                     logger.debug(f"工具调用请求：{call.name}，参数：{call.args}")

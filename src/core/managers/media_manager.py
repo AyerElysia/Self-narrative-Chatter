@@ -348,10 +348,16 @@ class MediaManager:
 
             async with get_db_session() as session:
                 # 查找现有记录（使用 image_id 作为唯一标识）
+                # 这里使用 scalars().first() 来避免数据库中存在多条重复记录导致的 MultipleResultsFound 错误
                 from sqlalchemy import select
-                stmt = select(Images).where(Images.image_id == media_hash)
+                stmt = (
+                    select(Images)
+                    .where(Images.image_id == media_hash)
+                    .order_by(Images.timestamp.desc())
+                    .limit(1)
+                )
                 result = await session.execute(stmt)
-                existing = result.scalar_one_or_none()
+                existing = result.scalars().first()
 
                 if existing:
                     # 更新现有记录
@@ -395,9 +401,16 @@ class MediaManager:
             from sqlalchemy import select
 
             async with get_db_session() as session:
-                stmt = select(Images).where(Images.image_id == media_hash)
+                # 如果存在多条重复记录，取最新一条返回
+                from sqlalchemy import select
+                stmt = (
+                    select(Images)
+                    .where(Images.image_id == media_hash)
+                    .order_by(Images.timestamp.desc())
+                    .limit(1)
+                )
                 result = await session.execute(stmt)
-                media = result.scalar_one_or_none()
+                media = result.scalars().first()
 
                 if media:
                     return {
@@ -543,13 +556,19 @@ class MediaManager:
             from sqlalchemy import select
 
             async with get_db_session() as session:
-                # 检查是否已存在
-                stmt = select(ImageDescriptions).where(
-                    ImageDescriptions.image_description_hash == media_hash,
-                    ImageDescriptions.type == media_type
+                # 检查是否已存在（避免重复记录导致 MultipleResultsFound）
+                from sqlalchemy import select
+                stmt = (
+                    select(ImageDescriptions)
+                    .where(
+                        ImageDescriptions.image_description_hash == media_hash,
+                        ImageDescriptions.type == media_type
+                    )
+                    .order_by(ImageDescriptions.timestamp.desc())
+                    .limit(1)
                 )
                 result = await session.execute(stmt)
-                existing = result.scalar_one_or_none()
+                existing = result.scalars().first()
 
                 if not existing:
                     # 创建新缓存记录

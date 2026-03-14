@@ -102,10 +102,13 @@ def _image_to_data_url(value: str) -> str:
         return value
 
     path = Path(value)
-    if path.exists() and path.is_file():
-        data = path.read_bytes()
-        b64 = base64.b64encode(data).decode("ascii")
-        return f"data:image/png;base64,{b64}"
+    try:
+        if path.exists() and path.is_file():
+            data = path.read_bytes()
+            b64 = base64.b64encode(data).decode("ascii")
+            return f"data:image/png;base64,{b64}"
+    except OSError:
+        pass
 
     # 尝试作为纯 base64 字符串处理（Image.value 规范化后为纯 base64）
     try:

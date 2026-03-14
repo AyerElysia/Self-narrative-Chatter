@@ -57,8 +57,11 @@ def _normalize_file_to_base64(
 
         # 尝试作为文件路径处理
         path = Path(s)
-        if path.exists() and path.is_file():
-            return base64.b64encode(path.read_bytes()).decode("utf-8")
+        try:
+            if path.exists() and path.is_file():
+                return base64.b64encode(path.read_bytes()).decode("utf-8")
+        except OSError:
+            pass
 
         # 最后尝试验证是否为纯 base64 字符串
         try:

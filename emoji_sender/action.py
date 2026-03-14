@@ -29,6 +29,18 @@ class SendEmojiMemeAction(BaseAction):
     action_description: str = "根据目标描述与情感标签，检索并发送一张符合当前情景的表情包来生动地表达情绪。不要忘记在聊天时使用这个动作，比起简单的文字它往往更受欢迎。此动作可以单独使用也可以和发送文字一起使用，更符合日常聊天习惯。"
     primary_action: bool = False
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # 注入自定义指令
+        try:
+            from .config import EmojiSenderConfig
+            if isinstance(self.plugin.config, EmojiSenderConfig):
+                custom = self.plugin.config.prompt.custom_instructions.strip()
+                if custom:
+                    self.action_description += f"\n\n自定义指令：\n{custom}"
+        except Exception:
+            pass
+
     async def execute(
         self,
         description_query: Annotated[str, "目标表情包的描述文本，用于向量匹配（例如：‘生气地翻白眼’）"],

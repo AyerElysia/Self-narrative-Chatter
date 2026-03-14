@@ -35,6 +35,20 @@ class EmojiSenderConfig(BaseConfig):
             description="是否将表情包使用提示同步到 default_chatter 的 actor system reminder",
         )
 
+    @config_section("prompt")
+    class PromptSection(SectionBase):
+        """自定义提示词配置。"""
+
+        custom_instructions: str = Field(
+            default="",
+            description=(
+                "追加到 send_emoji_meme action 描述末备的自定义指令。\n"
+                "可描述希望 AI 主动使用表情包的具体场景，"
+                "例如：在表达强烈情感、开玩笑或缓解尴尬时主动使用。\n"
+                "不会覆盖已有的触发条件，只是扩充场景说明。"
+            ),
+        )
+
     @config_section("ingest")
     class IngestSection(SectionBase):
         """入库相关配置。"""
@@ -90,6 +104,7 @@ class EmojiSenderConfig(BaseConfig):
 
     scheduler: SchedulerSection = Field(default_factory=SchedulerSection)
     plugin: PluginSection = Field(default_factory=PluginSection)
+    prompt: PromptSection = Field(default_factory=PromptSection)
     ingest: IngestSection = Field(default_factory=IngestSection)
     vector: VectorSection = Field(default_factory=VectorSection)
     storage: StorageSection = Field(default_factory=StorageSection)

@@ -84,8 +84,17 @@ class EmojiSenderPlugin(BasePlugin):
         return [EmojiSenderService, SendEmojiMemeAction]
 
     async def on_plugin_loaded(self) -> None:
-        """插件加载完成后：后台等待 scheduler start，再注册周期任务。"""
+        """插件加载完成后：初始化配置并注册周期任务。"""
         sync_emoji_sender_actor_reminder(self)
+
+        # 将自定义场景说明追加到 action 的描述，使 Chatter 侧感知使用时机
+        if isinstance(self.config, EmojiSenderConfig):
+            custom = self.config.prompt.custom_instructions.strip()
+            if custom:
+                SendEmojiMemeAction.action_description = (
+                    SendEmojiMemeAction.action_description.rstrip() + "\n\n自定义指令：\n" + custom
+                )
+                logger.debug("已将自定义场景说明追加到 send_emoji_meme 描述")
 
         tm = get_task_manager()
         task = tm.create_task(

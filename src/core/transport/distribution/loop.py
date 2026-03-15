@@ -98,7 +98,10 @@ async def run_chat_stream(
 
     try:
         from src.core.managers import get_chatter_manager
+        from src.core.managers import get_event_manager
+        from src.core.components.types import EventType
         chatter_manager = get_chatter_manager()
+        event_manager = get_event_manager()
 
         # 1. 创建生成器
         tick_generator = conversation_loop(
@@ -170,6 +173,23 @@ async def run_chat_stream(
                 try:
                     # 并发保护：标记正在处理
                     context.is_chatter_processing = True
+
+                    step_event_result = await event_manager.publish_event(
+                        EventType.ON_CHATTER_STEP,
+                        {
+                            "stream_id": stream_id,
+                            "context": context,
+                            "tick": tick,
+                            "chatter_gene": chatter_gene,
+                            "continue": True,
+                        },
+                    )
+                    step_event_params = step_event_result.get("params", {})
+                    if step_event_params.get("continue") is False:
+                        logger.debug(
+                            f"[驱动器] stream={stream_id[:8]}, on_chatter_step continue=False，跳过本 Tick"
+                        )
+                        continue
                     
                     # 执行一步迭代
                     result = await anext(chatter_gene)

@@ -687,5 +687,4 @@ class DefaultChatterPlugin(BasePlugin):
             DefaultChatter,
             SendTextAction,
             PassAndWaitAction,
-            StopConversationAction,
         ]

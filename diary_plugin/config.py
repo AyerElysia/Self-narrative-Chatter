@@ -160,7 +160,7 @@ class ContinuousMemorySection(SectionBase):
     )
     inject_prompt: bool = Field(
         default=True,
-        description="是否将当前聊天流的连续记忆动态注入主回复 prompt",
+        description="是否将当前聊天流的连续记忆动态注入主回复 prompt 的专用 continuous_memory 区块",
     )
     include_recent_entries_in_prompt: bool = Field(
         default=False,

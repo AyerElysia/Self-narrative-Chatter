@@ -176,7 +176,7 @@ diary_plugin/
 
 ### 4. 连续记忆注入
 
-连续记忆会在 `on_prompt_build` 阶段注入到目标 prompt 的 `extra` 区块中。
+连续记忆会在 `on_prompt_build` 阶段注入到目标 prompt 的专用 `continuous_memory` 区块中，不会再和 `extra` 混在一起。
 
 默认目标模板是：
 
@@ -264,4 +264,3 @@ data/continuous_memories/discuss/<stream_id>.json
 
 - 实现报告：`report/2026-03-22_diary_plugin_persona_prompt_alignment_report.md`
 - 旧连续记忆报告：`report/diary_plugin_continuous_memory_implementation_report.md`
-

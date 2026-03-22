@@ -356,14 +356,14 @@ class ContinuousMemoryPromptInjector(BaseEventHandler):
         if service is None:
             return EventDecision.SUCCESS, params
 
-        memory_block = service.render_continuous_memory_for_prompt(stream_id)
+        memory_block = service.render_continuous_memory_for_prompt(
+            stream_id,
+            values.get("chat_type"),
+        )
         if not memory_block:
             return EventDecision.SUCCESS, params
 
-        current_extra = str(values.get("extra", "") or "")
-        values["extra"] = (
-            f"{current_extra}\n\n{memory_block}".strip() if current_extra else memory_block
-        )
+        values["continuous_memory"] = memory_block
 
         return EventDecision.SUCCESS, params
 

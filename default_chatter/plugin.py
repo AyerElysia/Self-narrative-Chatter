@@ -3,7 +3,6 @@
 提供默认的聊天对话逻辑，包含三个核心 Action：
 - send_text: 发送文本消息给用户
 - pass_and_wait: 跳过本次动作，等待新消息
-- stop_conversation: 结束当前对话轮次，设置冷却时间
 
 使用 personality 配置动态构建系统提示词。
 """
@@ -246,37 +245,17 @@ class PassAndWaitAction(BaseAction):
     """跳过本次动作，等待新消息"""
 
     action_name = "pass_and_wait"
-    action_description = "跳过本次动作，不进行任何操作，但保持对话继续，等待用户新消息。若当前不需要回复，但对话还在进行中，使用本工具等待用户的下一条消息。请不要和结束对话混淆，除非你非常确定你和用户的对话没有结束，或者你需要等待用户提供更多信息来决定下一步怎么做，否则你通常应该直接结束对话，等待下一轮新消息触发新的对话。"
+    action_description = "跳过本次动作，不进行任何操作，但保持对话继续，等待用户新消息。若当前不需要回复，就使用本工具等待用户的下一条消息。"
 
     chatter_allow: list[str] = ["default_chatter"]
 
     async def execute(self) -> tuple[bool, str]:
         """跳过本次动作，不执行任何操作"""
         return True, "已跳过，等待新消息"
-
-
-class StopConversationAction(BaseAction):
-    """结束当前对话轮次"""
-
-    action_name = "stop_conversation"
-    action_description = "结束当前对话，过一段时间后再允许开启新对话。如果对话已经自然结束，或者你认为本轮对话可以告一段落，或者你暂时不想继续对话，使用本工具结束这轮对话。通常当你已经做出回应，且后续的消息很可能是新的话题时，使用本工具结束对话。你可以指定一个冷却时间（分钟），在此期间即使有新消息也不会触发新的对话，直到冷却时间结束后才会重新允许开启新对话。"
-
-    chatter_allow: list[str] = ["default_chatter"]
-
-    async def execute(self, minutes: float) -> tuple[bool, str]:
-        """结束对话并设置冷却时间
-
-        Args:
-            minutes: 冷却时间（分钟），在此期间不会开启新对话
-        """
-        return True, f"对话已结束，将在 {minutes} 分钟后允许新对话"
-
-
 # ─── Chatter ────────────────────────────────────────────────
 
 # 控制流标记名称，与 BaseAction.to_schema() 生成的 name 保持一致（含 action- 前缀）
 _PASS_AND_WAIT = "action-pass_and_wait"
-_STOP_CONVERSATION = "action-stop_conversation"
 _SEND_TEXT = "action-send_text"
 
 # SUSPEND 占位符：当 LLM 本轮全部调用的都是 action 时，注入此占位防止上下文缺少 assistant 轮次
@@ -290,7 +269,7 @@ class DefaultChatter(BaseChatter):
     1. 构建 LLM 上下文（系统提示 + 历史消息 + 当前未读消息）
     2. 注册所有可用的 LLMUsable 工具
     3. 循环调用 LLM 并执行其返回的 tool calls
-    4. 根据 pass_and_wait / stop_conversation 控制对话流程
+    4. 根据 pass_and_wait 控制对话流程
     """
 
     chatter_name: str = "default_chatter"
@@ -511,8 +490,8 @@ class DefaultChatter(BaseChatter):
         """执行聊天器的对话循环。
 
         一轮对话包含完整的上下文消息（系统提示 + 历史 + 未读 + LLM call history）。
-        新的 LLM 交互记录会不断追加到上下文中。当 stop_conversation 被调用后，
-        本轮对话结束，下次触发将使用全新的上下文。
+        新的 LLM 交互记录会不断追加到上下文中；当本轮自然结束后，
+        下次触发将使用全新的上下文。
 
         Yields:
             Wait | Success | Failure | Stop: 执行结果
@@ -550,7 +529,6 @@ class DefaultChatter(BaseChatter):
             chat_stream=chat_stream,
             logger=logger,
             pass_call_name=_PASS_AND_WAIT,
-            stop_call_name=_STOP_CONVERSATION,
             send_text_call_name=_SEND_TEXT,
             suspend_text=_SUSPEND_TEXT,
         ):
@@ -565,7 +543,6 @@ class DefaultChatter(BaseChatter):
             chat_stream=chat_stream,
             logger=logger,
             pass_call_name=_PASS_AND_WAIT,
-            stop_call_name=_STOP_CONVERSATION,
             send_text_call_name=_SEND_TEXT,
             suspend_text=_SUSPEND_TEXT,
         ):

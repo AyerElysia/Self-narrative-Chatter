@@ -163,7 +163,6 @@ async def run_enhanced(
     chat_stream: ChatStream,
     logger: Logger,
     pass_call_name: str,
-    stop_call_name: str,
     send_text_call_name: str,
     suspend_text: str,
 ) -> AsyncGenerator[Wait | Success | Failure | Stop, None]:
@@ -309,16 +308,10 @@ async def run_enhanced(
                 usable_map=usable_map,
                 trigger_msg=rt.unreads[-1] if rt.unreads else None,
                 pass_call_name=pass_call_name,
-                stop_call_name=stop_call_name,
                 send_text_call_name=send_text_call_name,
                 break_on_send_text=False,
                 cross_round_seen_signatures=rt.cross_round_seen_signatures,
             )
-
-            if call_outcome.should_stop:
-                logger.info(f"对话已结束，冷却 {call_outcome.stop_minutes} 分钟")
-                yield Stop(call_outcome.stop_minutes * 60)
-                return
 
             if call_outcome.has_pending_tool_results:
                 _transition(rt=rt, to_phase=_ToolCallWorkflowPhase.FOLLOW_UP, logger=logger, reason="pending tool results")
@@ -343,7 +336,6 @@ async def run_classical(
     chat_stream: ChatStream,
     logger: Logger,
     pass_call_name: str,
-    stop_call_name: str,
     send_text_call_name: str,
     suspend_text: str,
 ) -> AsyncGenerator[Wait | Success | Failure | Stop, None]:
@@ -449,7 +441,6 @@ async def run_classical(
                 usable_map=usable_map,
                 trigger_msg=unreads[-1] if unreads else None,
                 pass_call_name=pass_call_name,
-                stop_call_name=stop_call_name,
                 send_text_call_name=send_text_call_name,
                 break_on_send_text=True,
                 cross_round_seen_signatures=cross_round_seen_signatures,
@@ -467,12 +458,6 @@ async def run_classical(
                 logger.info("classical 模式已发送一次消息，强制结束当前对话")
                 await chatter.flush_unreads(unread_msgs)
                 yield Stop(0)
-                return
-
-            if call_outcome.should_stop:
-                logger.info(f"对话已结束，冷却 {call_outcome.stop_minutes} 分钟")
-                await chatter.flush_unreads(unread_msgs)
-                yield Stop(call_outcome.stop_minutes * 60)
                 return
 
             if call_outcome.should_wait:

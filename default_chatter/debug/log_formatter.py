@@ -186,8 +186,5 @@ def log_dc_result(response: Any, config: DefaultChatterConfig) -> None:
                 logger.info(f"[bold green]💬[/bold green] {content}")
         elif call_name == "action-pass_and_wait":
             logger.info("[bold yellow]⏳[/bold yellow] 等待中...")
-        elif call_name == "action-stop_conversation":
-            minutes = args.get("minutes", 5)
-            logger.info(f"[bold red]🛑[/bold red] 结束对话，冷却 {minutes} 分钟")
         else:
             logger.info(f"[bold cyan]🎯[/bold cyan] 工具调用: {call_name}")

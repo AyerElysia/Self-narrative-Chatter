@@ -35,6 +35,24 @@ logger = get_logger("napcat_adapter")
 class MessageHandler:
     """处理来自 Napcat 的消息事件"""
 
+    _VIDEO_FILE_EXTENSIONS = frozenset(
+        {
+            ".mp4",
+            ".mov",
+            ".m4v",
+            ".webm",
+            ".mkv",
+            ".avi",
+            ".flv",
+            ".wmv",
+            ".mpeg",
+            ".mpg",
+            ".3gp",
+            ".ts",
+            ".m2ts",
+        }
+    )
+
     def __init__(self, adapter: "NapcatAdapter"):
         self.adapter = adapter
         self._video_downloader = None
@@ -195,7 +213,7 @@ class MessageHandler:
             case RealMessageType.json:
                 return await self._handle_json_message(segment)
             case RealMessageType.file:
-                return await self._handle_file_message(segment)
+                return await self._handle_file_message(segment, raw_message)
 
             case _:
                 logger.warning(f"Unsupported segment type: {seg_type}")
@@ -330,6 +348,24 @@ class MessageHandler:
     async def _handle_video_message(self, segment: dict) -> SegPayload | None:
         """处理视频消息"""
         message_data = segment.get("data", {})
+
+        video_base64 = message_data.get("base64")
+        if isinstance(video_base64, str) and video_base64:
+            if video_base64.startswith("base64://"):
+                video_base64 = video_base64[len("base64://") :]
+            size_mb = message_data.get("size_mb")
+            if size_mb is None:
+                try:
+                    size_mb = len(video_base64) * 3 / 4 / (1024 * 1024)
+                except Exception:
+                    size_mb = None
+            payload: dict[str, Any] = {
+                "base64": video_base64,
+                "filename": message_data.get("filename", "video.mp4"),
+            }
+            if size_mb is not None:
+                payload["size_mb"] = size_mb
+            return {"type": "video", "data": payload}
 
         video_url = message_data.get("url")
         file_path = message_data.get("filePath") or message_data.get("file_path")
@@ -543,7 +579,119 @@ class MessageHandler:
                 seg_list.append(full_seg_data)
         return {"type": "seglist", "data": seg_list}, image_count
 
-    async def _handle_file_message(self, segment: dict) -> SegPayload | None:
+    @classmethod
+    def _is_video_file_name(cls, file_name: Any) -> bool:
+        if not isinstance(file_name, str) or not file_name:
+            return False
+        normalized_name = file_name.split("?", 1)[0].split("#", 1)[0].lower()
+        return Path(normalized_name).suffix in cls._VIDEO_FILE_EXTENSIONS
+
+    @staticmethod
+    def _extract_video_source_from_file_data(file_data: dict[str, Any]) -> tuple[str | None, str | None]:
+        """从 file 段 data 中提取可用的视频 URL/文件路径。"""
+        if not isinstance(file_data, dict):
+            return None, None
+
+        # 先尝试常见 URL 字段
+        for key in ("url", "file_url", "download_url", "downloadUrl", "src"):
+            value = file_data.get(key)
+            if isinstance(value, str) and value.startswith(("http://", "https://")):
+                return value, None
+
+        # 再尝试本地路径字段
+        for key in ("filePath", "file_path", "path", "local_path", "localPath", "temp_path", "filepath"):
+            value = file_data.get(key)
+            if isinstance(value, str) and value:
+                if value.startswith("file://"):
+                    return None, value[7:]
+                return None, value
+
+        # 某些实现会把 URL/路径塞在 file 字段
+        raw_file = file_data.get("file")
+        if isinstance(raw_file, str) and raw_file:
+            if raw_file.startswith(("http://", "https://")):
+                return raw_file, None
+            if raw_file.startswith("file://"):
+                return None, raw_file[7:]
+            # 某些 get_file 返回值会把本地路径直接放在 file 字段
+            if (
+                raw_file.startswith(("/", "./", "../"))
+                or "\\" in raw_file
+                or ":" in raw_file[:3]  # 兼容 Windows 盘符路径
+            ):
+                return None, raw_file
+
+        return None, None
+
+    @staticmethod
+    def _extract_video_base64_from_file_data(file_data: dict[str, Any]) -> str | None:
+        if not isinstance(file_data, dict):
+            return None
+        raw = file_data.get("base64")
+        if isinstance(raw, str) and raw:
+            if raw.startswith("base64://"):
+                return raw[len("base64://") :]
+            return raw
+        return None
+
+    async def _try_resolve_video_source_by_file_api(
+        self,
+        *,
+        file_id: str | None,
+        file_name: str | None,
+        group_id: str | int | None,
+    ) -> tuple[str | None, str | None, str | None, dict[str, Any] | None]:
+        """通过 Napcat File API 尝试解析视频源（base64 / url / path）。"""
+        if not self.adapter:
+            return None, None, None, None
+
+        api_calls: list[tuple[str, dict[str, Any]]] = []
+        if file_id:
+            api_calls.append(("get_file", {"file_id": file_id}))
+        if file_name:
+            api_calls.append(("get_file", {"file": file_name}))
+        if file_id:
+            api_calls.append(("get_private_file_url", {"file_id": file_id}))
+            if group_id:
+                # 某些实现需要 busid，这里先尝试最小参数；失败会自动忽略
+                api_calls.append(("get_group_file_url", {"group_id": str(group_id), "file_id": file_id}))
+
+        for action, params in api_calls:
+            try:
+                resp = await self.adapter.send_napcat_api(action, params, timeout=8.0)
+            except Exception as e:
+                logger.debug(f"{action} 调用失败，params={params}: {e!s}")
+                continue
+
+            if not isinstance(resp, dict):
+                continue
+            if resp.get("status") not in ("ok", None):
+                logger.debug(f"{action} 返回非成功状态: {resp}")
+                continue
+
+            data = resp.get("data")
+            payload: dict[str, Any] | None = data if isinstance(data, dict) else None
+
+            if isinstance(data, str) and data.startswith(("http://", "https://")):
+                logger.info(f"{action} 成功获取视频 URL")
+                return data, None, None, None
+
+            if not payload:
+                continue
+
+            base64_data = self._extract_video_base64_from_file_data(payload)
+            if base64_data:
+                logger.info(f"{action} 成功获取视频 base64 数据")
+                return None, None, base64_data, payload
+
+            video_url, file_path = self._extract_video_source_from_file_data(payload)
+            if video_url or file_path:
+                logger.info(f"{action} 成功获取视频源: {'url' if video_url else 'path'}")
+                return video_url, file_path, None, payload
+
+        return None, None, None, None
+
+    async def _handle_file_message(self, segment: dict, raw_message: dict | None = None) -> SegPayload | None:
         """处理文件消息"""
         message_data = segment.get("data", {})
         if not message_data:
@@ -556,6 +704,92 @@ class MessageHandler:
         file_id = message_data.get("file_id")
 
         logger.info(f"收到文件消息: name={file_name}, size={file_size}, id={file_id}")
+
+        # 兼容 Napcat 将视频作为 file 段上报的场景：
+        # 若文件后缀是视频，优先尝试转为 video 段，让后续链路产出视频摘要。
+        if self._is_video_file_name(file_name):
+            video_processing_enabled = True
+            if self.adapter.plugin and self.adapter.plugin.config:
+                video_processing_enabled = bool(self.adapter.plugin.config.features.enable_video_processing)
+            if not video_processing_enabled:
+                logger.info("检测到视频文件扩展名，但视频处理功能已禁用，保持为普通文件")
+            else:
+                video_url, file_path = self._extract_video_source_from_file_data(message_data)
+                video_base64 = self._extract_video_base64_from_file_data(message_data)
+                api_payload: dict[str, Any] | None = None
+
+                # 某些平台回调里 file 段没有 URL/路径，补拉一次 get_msg 详情再尝试提取。
+                if not video_url and not file_path and not video_base64 and raw_message:
+                    message_id = raw_message.get("message_id")
+                    if message_id:
+                        try:
+                            detail = await get_message_detail(message_id=message_id, adapter=self.adapter)
+                        except Exception as e:
+                            logger.warning(f"视频文件消息补拉详情失败(message_id={message_id}): {e!s}")
+                            detail = None
+
+                        if isinstance(detail, dict):
+                            for sub_seg in detail.get("message", []):
+                                if not isinstance(sub_seg, dict):
+                                    continue
+                                if sub_seg.get("type") != RealMessageType.file:
+                                    continue
+                                sub_data = sub_seg.get("data", {})
+                                if not isinstance(sub_data, dict):
+                                    continue
+                                video_url, file_path = self._extract_video_source_from_file_data(sub_data)
+                                video_base64 = self._extract_video_base64_from_file_data(sub_data)
+                                if video_url or file_path or video_base64:
+                                    logger.info("视频文件消息补拉详情成功，已提取可用视频源")
+                                    break
+
+                # 仍没有可用来源时，尝试通过 file_id 走 Napcat File API 补全
+                if not video_url and not file_path and not video_base64:
+                    group_id = raw_message.get("group_id") if raw_message else None
+                    video_url, file_path, video_base64, api_payload = await self._try_resolve_video_source_by_file_api(
+                        file_id=str(file_id) if file_id else None,
+                        file_name=str(file_name) if file_name else None,
+                        group_id=group_id,
+                    )
+
+                if video_base64:
+                    logger.info("检测到视频文件扩展名，已通过补全拿到 base64，按视频链路处理")
+                    filename = str(
+                        (api_payload or {}).get("file_name")
+                        or (api_payload or {}).get("name")
+                        or file_name
+                        or "video.mp4"
+                    )
+                    size_field = (api_payload or {}).get("file_size") or (api_payload or {}).get("size")
+                    size_mb: float | None = None
+                    if size_field:
+                        try:
+                            size_mb = float(size_field) / (1024 * 1024)
+                        except Exception:
+                            size_mb = None
+                    payload: dict[str, Any] = {
+                        "base64": video_base64,
+                        "filename": filename,
+                    }
+                    if size_mb is not None:
+                        payload["size_mb"] = size_mb
+                    return {"type": "video", "data": payload}
+
+                if video_url or file_path:
+                    logger.info("检测到视频文件扩展名，按视频链路处理")
+                    return await self._handle_video_message(
+                        {
+                            "type": RealMessageType.video,
+                            "data": {
+                                "url": video_url,
+                                "filePath": file_path,
+                            },
+                        }
+                    )
+
+                if file_id:
+                    logger.info("视频文件 File API 补全失败：未获取到 base64/url/path")
+                logger.info("检测到视频文件扩展名，但缺少可用 URL/路径，回退为普通文件消息")
 
         # 将文件信息打包成字典
         file_data = {
@@ -761,4 +995,3 @@ class MessageHandler:
             logger.error(f"从文件回声中提取信息失败: {e}")
 
         return None
-

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 from collections.abc import Callable
 
 from src.core.components.types import ChatType
@@ -15,6 +16,22 @@ from .config import DefaultChatterConfig
 
 class DefaultChatterPromptBuilder:
     """Default Chatter 提示词构建器。"""
+
+    @staticmethod
+    def _clamp_probability(probability: float) -> float:
+        if probability < 0:
+            return 0.0
+        if probability > 1:
+            return 1.0
+        return probability
+
+    @staticmethod
+    def _should_include_persona_field(enabled: bool, probability: float) -> bool:
+        if not enabled:
+            return True
+        return random.random() < DefaultChatterPromptBuilder._clamp_probability(
+            probability
+        )
 
     @staticmethod
     def get_mode(plugin_config: DefaultChatterConfig | None) -> str:
@@ -45,6 +62,20 @@ class DefaultChatterPromptBuilder:
         chat_stream: ChatStream,
     ) -> str:
         """构建系统提示词。"""
+        from src.app.plugin_system.api import adapter_api
+
+        bot_info = await adapter_api.get_bot_info_by_platform(chat_stream.platform) or {}
+        platform_name = str(
+            bot_info.get("bot_name")
+            or chat_stream.bot_nickname
+            or "未知"
+        )
+        platform_id = str(
+            bot_info.get("bot_id")
+            or chat_stream.bot_id
+            or "未知"
+        )
+
         selected_theme_guide = ""
         if plugin_config is not None:
             chat_type_raw = str(chat_stream.chat_type or "").lower()
@@ -57,12 +88,79 @@ class DefaultChatterPromptBuilder:
         tmpl = get_prompt_manager().get_template("default_chatter_system_prompt")
         if not tmpl:
             return ""
+
+        personality_core = ""
+        personality_side = ""
+        reply_style = ""
+        identity = ""
+        background_story = ""
+
+        probability_enabled = (
+            plugin_config is not None
+            and plugin_config.plugin.probabilistic_persona_injection_enabled
+        )
+
+        try:
+            personality = get_core_config().personality
+        except Exception:
+            personality = None
+
+        if personality is not None:
+            if plugin_config is None:
+                personality_core = getattr(personality, "personality_core", "") or ""
+                personality_side = getattr(personality, "personality_side", "") or ""
+                reply_style = getattr(personality, "reply_style", "") or ""
+                identity = getattr(personality, "identity", "") or ""
+                background_story = (
+                    getattr(personality, "background_story", "") or ""
+                )
+            else:
+                settings = plugin_config.plugin
+                if DefaultChatterPromptBuilder._should_include_persona_field(
+                    probability_enabled,
+                    settings.personality_core_injection_probability,
+                ):
+                    personality_core = (
+                        getattr(personality, "personality_core", "") or ""
+                    )
+                if DefaultChatterPromptBuilder._should_include_persona_field(
+                    probability_enabled,
+                    settings.personality_side_injection_probability,
+                ):
+                    personality_side = (
+                        getattr(personality, "personality_side", "") or ""
+                    )
+                if DefaultChatterPromptBuilder._should_include_persona_field(
+                    probability_enabled,
+                    settings.reply_style_injection_probability,
+                ):
+                    reply_style = getattr(personality, "reply_style", "") or ""
+                if DefaultChatterPromptBuilder._should_include_persona_field(
+                    probability_enabled,
+                    settings.identity_injection_probability,
+                ):
+                    identity = getattr(personality, "identity", "") or ""
+                if DefaultChatterPromptBuilder._should_include_persona_field(
+                    probability_enabled,
+                    settings.background_story_injection_probability,
+                ):
+                    background_story = (
+                        getattr(personality, "background_story", "") or ""
+                    )
+
         return await (
             tmpl.set("platform", chat_stream.platform)
             .set("chat_type", chat_stream.chat_type)
             .set("nickname", chat_stream.bot_nickname)
-            .set("bot_id", chat_stream.bot_id)
+            .set("bot_id", platform_id)
+            .set("platform_name", platform_name)
+            .set("platform_id", platform_id)
             .set("theme_guide", selected_theme_guide)
+            .set("personality_core", personality_core)
+            .set("personality_side", personality_side)
+            .set("reply_style", reply_style)
+            .set("identity", identity)
+            .set("background_story", background_story)
             .set("stream_id", chat_stream.stream_id or "")
             .build()
         )

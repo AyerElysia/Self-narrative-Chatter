@@ -12,6 +12,30 @@ mode = "enhanced"
 # 值类型：bool, 默认值：true
 reinforce_negative_behaviors = false
 
+# 是否启用系统提示词中的人设段落概率注入
+# 值类型：bool, 默认值：false
+probabilistic_persona_injection_enabled = false
+
+# personality_core 注入概率，取值 0.0~1.0
+# 值类型：float, 默认值：1.0
+personality_core_injection_probability = 1.0
+
+# personality_side 注入概率，取值 0.0~1.0
+# 值类型：float, 默认值：1.0
+personality_side_injection_probability = 1.0
+
+# reply_style 注入概率，取值 0.0~1.0
+# 值类型：float, 默认值：1.0
+reply_style_injection_probability = 1.0
+
+# identity 注入概率，取值 0.0~1.0
+# 值类型：float, 默认值：1.0
+identity_injection_probability = 1.0
+
+# background_story 注入概率，取值 0.0~1.0
+# 值类型：float, 默认值：1.0
+background_story_injection_probability = 1.0
+
 # 原生多模态模式。启用后，图片直接打包进 LLM payload，由主模型在对话上下文中理解图片内容并做出响应。需确保对应模型支持多模态输入。
 # 值类型：bool, 默认值：false
 native_multimodal = false
@@ -19,6 +43,28 @@ native_multimodal = false
 # 原生多模态模式下单次 payload 的图片上限。用户新消息图片优先，其次是历史图片。
 # 值类型：int, 默认值：4
 max_images_per_payload = 4
+
+# 原生多模态模式下单次 payload 的视频上限。超出部分仅保留文本摘要，不再以原生视频输入。
+# 值类型：int, 默认值：1
+max_videos_per_payload = 1
+
+# 原生多模态模式下是否启用原生视频输入。关闭后视频仅以文本摘要参与对话。
+# 值类型：bool, 默认值：true
+native_video_multimodal = true
+
+# 分段发送节奏配置。
+[plugin.reply]
+# 模拟打字速度(字/秒)，小于等于 0 时不添加分段延迟
+# 值类型：float, 默认值：15.0
+typing_chars_per_sec = 15.0
+
+# 分段发送时的最小段间延迟(秒)
+# 值类型：float, 默认值：0.8
+typing_delay_min = 0.8
+
+# 分段发送时的最大段间延迟(秒)
+# 值类型：float, 默认值：4.0
+typing_delay_max = 4.0
 
 
 # 不同聊天类型的人设/语气引导。

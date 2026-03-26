@@ -9,8 +9,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
-from typing import AsyncGenerator
+import json
+import re
+from typing import Annotated, Any, AsyncGenerator
 
 from src.core.components.types import ChatType
 from src.app.plugin_system.api.log_api import get_logger
@@ -39,6 +42,7 @@ from .runners import run_classical, run_enhanced
 from .type_defs import LLMConversationState, LLMResponseLike, SubAgentDecision
 
 logger = get_logger("default_chatter")
+_REASON_LEAK_PATTERN = re.compile(r'[,，]?\s*reason[:：]', re.IGNORECASE)
 
 # ─── 系统提示词构建 ─────────────────────────────────────────────
 system_prompt = """# 关于你
@@ -80,6 +84,10 @@ system_prompt = """# 关于你
 
 # 工具介绍
 - Action：action通常是你在对话中需要执行的动作，例如发送消息、结束对话等。你可以调用 action 来完成这些任务，调用时请务必按照规定的格式提供必要的信息。这类工具通常不会提供任何信息，因此如果当你调用action并收到返回结果后，你只需要输出"__SUSPEND__"表示挂起对话等待下一步指令即可。
+- send_text 使用规范：
+1. 如果你需要发送多条消息，可以像这样分段"content": ["你好", "请问你是谁？", "找我有什么事吗？"]
+2. 私聊场景下，reply_to 默认不要使用，除非确实需要引用某条历史消息来避免歧义。
+3. content 里只能写真正要发给用户的正文，不要把 reason/thought 等元信息写进去。
 - Tool：tool通常是你在对话中需要查询信息或执行特定功能时调用的工具，例如查询天气、计算器等。你可以调用 tool 来获取这些信息或功能，调用时请务必按照规定的格式提供必要的信息。这类工具通常会返回一些结果信息，因此当你调用tool并收到返回结果后，你应该根据结果信息继续进行合理的回复或进一步执行其他工具。
 - Agent：agent通常是你在对话中需要调用的智能体，例如执行复杂任务、处理多轮对话等。你可以调用 agent 来完成这些任务，调用时请务必按照规定的格式提供必要的信息。这类工具通常会返回一些结果信息，因此当你调用agent并收到返回结果后，你应该根据结果信息继续进行合理的回复或进一步执行其他工具。
 
@@ -150,54 +158,134 @@ class SendTextAction(BaseAction):
     """发送文本消息"""
 
     action_name = "send_text"
-    action_description = "发送一段文本消息给用户。你可以一次调用多个 send_text 来分多段回复，但每次调用必须提供你想说的话的文本内容，不要添加任何标记或格式，只写纯文本即可。你也可以选择引用之前某条消息作为背景，使用 reply_to 参数指定。注意：本工具无法发送表情包等非文本内容。"
+    action_description = (
+        "发送文本消息给用户。"
+        "content 支持单条字符串或字符串数组。"
+        "如果你需要发送多条消息，可以像这样分段"
+        "\"content\": [\"你好\", \"请问你是谁？\", \"找我有什么事吗？\"]。"
+        "分段消息会按顺序发送，并自动模拟段间打字延迟。"
+        "私聊场景下 reply_to 默认不要使用，除非确实需要引用某条历史消息来避免歧义。"
+        "注意：本工具无法发送表情包等非文本内容。"
+    )
 
     chatter_allow: list[str] = ["default_chatter"]
 
-    async def execute(self, content: str, reply_to: str | None = None) -> tuple[bool, str]:
-        """执行发送文本消息的逻辑
+    @staticmethod
+    def _normalize_content_segments(content: str | list[str]) -> list[str]:
+        """将 content 统一规范为分段文本列表。"""
+        if isinstance(content, list):
+            return [s.strip() for s in content if isinstance(s, str) and s.strip()]
 
-        Args:
-            content: 要发送的文本内容，不用添加标记，只写你想说的话即可
-            reply_to: 可选，要引用回复的目标消息 ID。若指定此参数，发送的消息将作为对该消息的回复
-        """
-        import re
-        from src.core.models.message import Message
+        if not isinstance(content, str):
+            return []
 
-        # 清洗 LLM 可能侧漏的 reason 字段
-        if content:
-            # 匹配 ,reason: 或 reason: 及其后的所有内容
-            content = re.split(r'[,，]?\s*reason[:：]', content, flags=re.IGNORECASE)[0].strip()
+        stripped = content.strip()
+        if not stripped:
+            return []
 
+        if stripped.startswith("["):
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, list):
+                    return [
+                        s.strip() for s in parsed if isinstance(s, str) and s.strip()
+                    ]
+            except Exception:
+                pass
+
+        return [stripped]
+
+    @staticmethod
+    def _sanitize_segment(content: str) -> str:
+        """清洗 LLM 可能侧漏到正文里的元字段。"""
         if not content:
-            return True, "内容为空，跳过发送"
-        
-        # 如果需要引用消息，创建带reply_to的Message对象
+            return ""
+        return _REASON_LEAK_PATTERN.split(content, maxsplit=1)[0].strip()
+
+    @staticmethod
+    def _resolve_reply_timing_config(
+        plugin_config: DefaultChatterConfig | None,
+    ) -> tuple[float, float, float]:
+        """读取发送节奏配置并返回 (chars_per_sec, min_delay, max_delay)。"""
+        default_chars_per_sec = 15.0
+        default_min_delay = 0.8
+        default_max_delay = 4.0
+
+        if not isinstance(plugin_config, DefaultChatterConfig):
+            return default_chars_per_sec, default_min_delay, default_max_delay
+
+        reply_config = getattr(plugin_config.plugin, "reply", None)
+        if reply_config is None:
+            return default_chars_per_sec, default_min_delay, default_max_delay
+
+        chars_per_sec = float(
+            getattr(reply_config, "typing_chars_per_sec", default_chars_per_sec)
+        )
+        min_delay = float(
+            getattr(reply_config, "typing_delay_min", default_min_delay)
+        )
+        max_delay = float(
+            getattr(reply_config, "typing_delay_max", default_max_delay)
+        )
+        return chars_per_sec, min_delay, max_delay
+
+    @classmethod
+    def _calculate_typing_delay(
+        cls,
+        content: str,
+        plugin_config: DefaultChatterConfig | None,
+    ) -> float:
+        """根据文本长度计算分段发送延迟。"""
+        chars_per_sec, min_delay, max_delay = cls._resolve_reply_timing_config(
+            plugin_config
+        )
+        if chars_per_sec <= 0:
+            return 0.0
+
+        base_delay = len(content) / chars_per_sec
+        lower = max(0.0, min_delay)
+        upper = max(0.0, max_delay)
+        if upper < lower:
+            upper = lower
+        return max(lower, min(base_delay, upper))
+
+    def _get_plugin_config(self) -> DefaultChatterConfig | None:
+        plugin_config = getattr(self.plugin, "config", None)
+        if isinstance(plugin_config, DefaultChatterConfig):
+            return plugin_config
+        return None
+
+    async def _send_one_segment(
+        self,
+        content: str,
+        reply_to: str | None = None,
+    ) -> bool:
+        """发送单条分段消息。"""
         if reply_to:
             target_stream_id = self.chat_stream.stream_id
             platform = self.chat_stream.platform
             chat_type = self.chat_stream.chat_type
             context = self.chat_stream.context
-            
+
             from src.core.managers.adapter_manager import get_adapter_manager
             from uuid import uuid4
-            
+
             bot_info = await get_adapter_manager().get_bot_info_by_platform(platform)
-            
+
             target_user_id = None
             target_group_id = None
             target_user_name = None
             target_group_name = None
-            
+
             def _get_last_context_message() -> Message | None:
                 if context.unread_messages:
                     return context.unread_messages[-1]
                 if context.history_messages:
                     return context.history_messages[-1]
                 return context.current_message
-            
+
             last_msg = _get_last_context_message()
-            
+
             if chat_type == "group":
                 if last_msg:
                     target_group_id = last_msg.extra.get("group_id")
@@ -207,7 +295,7 @@ class SendTextAction(BaseAction):
                 if not target_user_id and last_msg:
                     target_user_id = last_msg.sender_id
                     target_user_name = last_msg.sender_name
-            
+
             extra: dict[str, str] = {}
             if target_user_id:
                 extra["target_user_id"] = target_user_id
@@ -217,7 +305,7 @@ class SendTextAction(BaseAction):
                 extra["target_group_id"] = target_group_id
             if target_group_name:
                 extra["target_group_name"] = target_group_name
-            
+
             message = Message(
                 message_id=f"action_{self.action_name}_{uuid4().hex}",
                 content=content,
@@ -231,14 +319,57 @@ class SendTextAction(BaseAction):
                 reply_to=reply_to,
             )
             message.extra.update(extra)
-            
+
             from src.core.transport.message_send import get_message_sender
+
             sender = get_message_sender()
-            success = await sender.send_message(message)
-            return success, f"已发送消息:{content}"
-        else:
-            await self._send_to_stream(content)
-            return True, f"已发送消息:{content}"
+            return await sender.send_message(message)
+
+        return await self._send_to_stream(content)
+
+    async def execute(
+        self,
+        content: Annotated[
+            str | list[str],
+            "要发送的内容。支持字符串或字符串数组；数组会按顺序分条发送。",
+        ],
+        reply_to: Annotated[
+            str | None,
+            "可选，要引用回复的目标消息 ID。分条发送时仅第一条使用。",
+        ] = None,
+    ) -> tuple[bool, str]:
+        """执行发送文本消息的逻辑
+
+        Args:
+            content: 要发送的文本内容。支持字符串或字符串数组
+            reply_to: 可选，要引用回复的目标消息 ID。分条发送时仅首条应用
+        """
+        segments = self._normalize_content_segments(content)
+        cleaned_segments = [
+            self._sanitize_segment(segment) for segment in segments
+        ]
+        cleaned_segments = [segment for segment in cleaned_segments if segment]
+
+        if not cleaned_segments:
+            return True, "内容为空，跳过发送"
+
+        plugin_config = self._get_plugin_config()
+        sent_count = 0
+
+        for index, segment in enumerate(cleaned_segments):
+            if index > 0:
+                delay = self._calculate_typing_delay(segment, plugin_config)
+                if delay > 0:
+                    await asyncio.sleep(delay)
+
+            segment_reply_to = reply_to if index == 0 else None
+            success = await self._send_one_segment(segment, segment_reply_to)
+            if not success:
+                return False, f"第{index + 1}条消息发送失败"
+            sent_count += 1
+
+        preview = cleaned_segments[0][:80] if cleaned_segments else ""
+        return True, f"已发送{sent_count}条消息: {preview}"
 
 
 class PassAndWaitAction(BaseAction):
@@ -311,18 +442,23 @@ class DefaultChatter(BaseChatter):
 
         image_count = 0
         emoji_count = 0
+        video_count = 0
         for media in media_list:
             media_type = str(media.get("type", "")).lower()
             if media_type == "emoji":
                 emoji_count += 1
             elif media_type == "image":
                 image_count += 1
+            elif media_type == "video":
+                video_count += 1
 
         parts: list[str] = []
         if image_count:
             parts.append(f"图片×{image_count}")
         if emoji_count:
             parts.append(f"表情包×{emoji_count}")
+        if video_count:
+            parts.append(f"视频×{video_count}")
         if not parts:
             return ""
         return f" [媒体: {'，'.join(parts)}]"
